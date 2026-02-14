@@ -110,6 +110,11 @@ html, body {
     border-radius: 6px 0 0 6px;
 }
 
+.toggle-btn:nth-child(2) {
+    border-left: none;
+    border-radius: 0;
+}
+
 .toggle-btn:last-child {
     border-radius: 0 6px 6px 0;
     border-left: none;
@@ -402,3 +407,129 @@ html, body {
 .flow-bullish { color: var(--green); font-weight: 600; white-space: nowrap; }
 .flow-bearish { color: var(--red);   font-weight: 600; white-space: nowrap; }
 .flow-neutral { color: var(--text-secondary); white-space: nowrap; }
+
+/* ============================================================
+   Performance Panel
+   ============================================================ */
+
+#performance-panel {
+    padding: 16px 20px;
+    overflow-y: auto;
+    flex: 1;
+}
+
+.perf-metrics-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    margin-bottom: 16px;
+}
+
+.perf-metric-card {
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.perf-metric-card .metric-label {
+    font-size: 10px;
+}
+
+.perf-metric-card .metric-value {
+    font-size: 16px;
+}
+
+/* Trade log table */
+#trade-log-table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+#trade-log-table thead th {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    background: var(--bg-surface);
+    padding: 8px 8px;
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-muted);
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+}
+
+#trade-log-table thead th:nth-child(n+3) { text-align: right; }
+
+#trade-log-table tbody td {
+    padding: 8px 8px;
+    font-size: 12px;
+    border-bottom: 1px solid rgba(48,54,61,0.5);
+}
+
+#trade-log-table tbody td:nth-child(n+3) {
+    text-align: right;
+    font-family: var(--font-mono);
+    font-size: 11px;
+}
+
+#trade-log-table tbody td:first-child {
+    font-weight: 600;
+    color: var(--accent);
+}
+
+/* PnL colors */
+.pnl-positive { color: var(--green) !important; font-weight: 600; }
+.pnl-negative { color: var(--red) !important; font-weight: 600; }
+
+/* Status badges */
+.status-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.status-pending {
+    background: rgba(210,153,34,0.15);
+    color: var(--orange);
+}
+
+.status-open {
+    background: rgba(41,98,255,0.15);
+    color: var(--accent);
+}
+
+.status-closed {
+    background: rgba(139,148,158,0.15);
+    color: var(--text-secondary);
+}
+
+/* Strategy badges */
+.strategy-badge {
+    display: inline-block;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+}
+
+.strategy-momentum {
+    background: rgba(41,98,255,0.12);
+    color: var(--accent);
+}
+
+.strategy-reversion {
+    background: rgba(63,185,80,0.12);
+    color: var(--green);
+}

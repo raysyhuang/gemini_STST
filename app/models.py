@@ -18,6 +18,7 @@ class Ticker(Base):
     market_data = relationship("DailyMarketData", back_populates="ticker")
     signals = relationship("ScreenerSignal", back_populates="ticker")
     reversion_signals = relationship("ReversionSignal", back_populates="ticker")
+    paper_trades = relationship("PaperTrade", back_populates="ticker")
 
 
 class DailyMarketData(Base):
@@ -90,4 +91,38 @@ class ReversionSignal(Base):
 
     __table_args__ = (
         UniqueConstraint("ticker_id", "date", name="uq_reversion_signal_ticker_date"),
+    )
+
+
+class PaperTrade(Base):
+    __tablename__ = "paper_trades"
+
+    id = Column(Integer, primary_key=True)
+    ticker_id = Column(Integer, ForeignKey("tickers.id"), nullable=False)
+    strategy = Column(String(20), nullable=False)  # "momentum" or "reversion"
+
+    signal_date = Column(Date, nullable=False)
+    entry_date = Column(Date)
+    entry_price = Column(Float)
+    shares = Column(Float)
+    position_size = Column(Float, default=1000.0)
+
+    stop_level = Column(Float)
+    highest_high_since_entry = Column(Float)
+
+    planned_exit_date = Column(Date)
+    actual_exit_date = Column(Date)
+    exit_price = Column(Float)
+    exit_reason = Column(String(30))  # "stop_loss", "trailing_stop", "time_exit"
+
+    pnl_dollars = Column(Float)
+    pnl_pct = Column(Float)
+    status = Column(String(10), nullable=False, default="pending")  # pending/open/closed
+
+    ticker = relationship("Ticker", back_populates="paper_trades")
+
+    __table_args__ = (
+        UniqueConstraint("ticker_id", "signal_date", "strategy", name="uq_paper_trade"),
+        Index("idx_paper_status", "status"),
+        Index("idx_paper_signal_date", "signal_date"),
     )

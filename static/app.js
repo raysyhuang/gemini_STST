@@ -57,7 +57,7 @@ window.addEventListener('resize', () => {
 // ---- State ----
 let screenerData = null;    // Cached momentum screener response
 let reversionData = null;   // Cached reversion screener response
-let activeView = 'momentum'; // 'momentum' | 'reversion'
+let activeView = 'momentum'; // 'momentum' | 'reversion' | 'performance'
 
 // ---- DOM references ----
 const panelTitle     = document.getElementById('panel-title');
@@ -77,6 +77,12 @@ const chartPlaceholder = document.getElementById('chart-placeholder');
 const loadingOverlay = document.getElementById('loading-overlay');
 const btnMomentum    = document.getElementById('btn-momentum');
 const btnReversion   = document.getElementById('btn-reversion');
+const btnPerformance = document.getElementById('btn-performance');
+const perfPanel      = document.getElementById('performance-panel');
+const perfMetricsGrid = document.getElementById('perf-metrics-grid');
+const tradeLogTable  = document.getElementById('trade-log-table');
+const tradeLogBody   = document.getElementById('trade-log-body');
+const perfEmpty      = document.getElementById('perf-empty');
 
 // ---- View toggle ----
 
@@ -86,19 +92,26 @@ function switchView(view) {
     // Toggle button active states
     btnMomentum.classList.toggle('active', view === 'momentum');
     btnReversion.classList.toggle('active', view === 'reversion');
+    btnPerformance.classList.toggle('active', view === 'performance');
 
-    // Update panel title
-    panelTitle.textContent = view === 'momentum' ? 'Momentum Triggers' : 'Oversold Reversions';
-
-    // Hide news panel on switch
+    // Hide all panels first
+    screenerTable.classList.add('hidden');
+    reversionTable.classList.add('hidden');
+    perfPanel.classList.add('hidden');
     newsPanel.classList.add('hidden');
+    screenerEmpty.classList.add('hidden');
 
+    // Update panel title and show relevant content
     if (view === 'momentum') {
-        reversionTable.classList.add('hidden');
+        panelTitle.textContent = 'Momentum Triggers';
         renderMomentumSignals();
-    } else {
-        screenerTable.classList.add('hidden');
+    } else if (view === 'reversion') {
+        panelTitle.textContent = 'Oversold Reversions';
         renderReversionSignals();
+    } else if (view === 'performance') {
+        panelTitle.textContent = 'Paper Trading';
+        perfPanel.classList.remove('hidden');
+        fetchPerformanceData();
     }
 }
 
@@ -316,6 +329,90 @@ async function loadBacktest(ticker, strategy = 'momentum') {
     } finally {
         loadingOverlay.classList.add('hidden');
     }
+}
+
+// ---- Performance Tab ----
+
+async function fetchPerformanceData() {
+    try {
+        const [metricsResp, tradesResp] = await Promise.all([
+            fetch('/api/paper/metrics'),
+            fetch('/api/paper/trades?status=all'),
+        ]);
+        const metrics = await metricsResp.json();
+        const tradesData = await tradesResp.json();
+
+        renderPerfMetrics(metrics);
+        renderTradeLog(tradesData.trades);
+    } catch (err) {
+        console.error('Error fetching performance data:', err);
+    }
+}
+
+function renderPerfMetrics(m) {
+    const pnlColor = m.total_pnl >= 0 ? 'var(--green)' : 'var(--red)';
+    const avgColor = m.avg_return_pct >= 0 ? 'var(--green)' : 'var(--red)';
+
+    perfMetricsGrid.innerHTML = `
+        <div class="perf-metric-card">
+            <span class="metric-label">Total PnL</span>
+            <span class="metric-value" style="color:${pnlColor}">$${m.total_pnl.toFixed(2)}</span>
+        </div>
+        <div class="perf-metric-card">
+            <span class="metric-label">Win Rate</span>
+            <span class="metric-value">${m.win_rate.toFixed(1)}%</span>
+        </div>
+        <div class="perf-metric-card">
+            <span class="metric-label">Profit Factor</span>
+            <span class="metric-value">${m.profit_factor.toFixed(2)}</span>
+        </div>
+        <div class="perf-metric-card">
+            <span class="metric-label">Trades</span>
+            <span class="metric-value">${m.closed_trades} <small style="color:var(--text-muted)">/ ${m.total_trades}</small></span>
+        </div>
+        <div class="perf-metric-card">
+            <span class="metric-label">Avg Return</span>
+            <span class="metric-value" style="color:${avgColor}">${m.avg_return_pct.toFixed(2)}%</span>
+        </div>
+        <div class="perf-metric-card">
+            <span class="metric-label">Avg Hold</span>
+            <span class="metric-value">${m.avg_hold_days.toFixed(1)}d</span>
+        </div>
+    `;
+}
+
+function renderTradeLog(trades) {
+    if (!trades || trades.length === 0) {
+        tradeLogTable.classList.add('hidden');
+        perfEmpty.classList.remove('hidden');
+        return;
+    }
+
+    perfEmpty.classList.add('hidden');
+    tradeLogTable.classList.remove('hidden');
+    tradeLogBody.innerHTML = '';
+
+    trades.forEach(t => {
+        const tr = document.createElement('tr');
+        const pnlVal = t.pnl_pct != null ? `${t.pnl_pct.toFixed(2)}%` : '--';
+        const pnlClass = t.pnl_pct > 0 ? 'pnl-positive' : t.pnl_pct < 0 ? 'pnl-negative' : '';
+        const entryStr = t.entry_price != null ? `$${t.entry_price.toFixed(2)}` : '--';
+        const exitStr = t.exit_price != null ? `$${t.exit_price.toFixed(2)}` : '--';
+
+        let badgeClass = 'status-pending';
+        if (t.status === 'open') badgeClass = 'status-open';
+        else if (t.status === 'closed') badgeClass = 'status-closed';
+
+        tr.innerHTML = `
+            <td>${t.ticker}</td>
+            <td><span class="strategy-badge strategy-${t.strategy}">${t.strategy}</span></td>
+            <td>${entryStr}</td>
+            <td>${exitStr}</td>
+            <td class="${pnlClass}">${pnlVal}</td>
+            <td><span class="status-badge ${badgeClass}">${t.status}</span></td>
+        `;
+        tradeLogBody.appendChild(tr);
+    });
 }
 
 // ---- Init ----

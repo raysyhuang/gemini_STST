@@ -341,6 +341,25 @@ async def run_daily_pipeline(screen_date: date | None = None) -> dict:
     # Step 5: Send unified Telegram notification (momentum + reversion)
     await send_telegram_alert(result, news_map, reversion_result=reversion_result)
 
+    # Step 6: Paper Trading — record signals, fill pending, check stops
+    try:
+        from app.paper_tracker import (
+            create_pending_trades,
+            fill_pending_trades,
+            check_open_trades,
+        )
+
+        db = SessionLocal()
+        try:
+            create_pending_trades(db, signals, "momentum")
+            create_pending_trades(db, rev_signals, "reversion")
+            fill_pending_trades(db)
+            check_open_trades(db, screen_date)
+        finally:
+            db.close()
+    except Exception:
+        logger.exception("Paper trading step failed")
+
     return result
 
 

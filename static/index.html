@@ -23,6 +23,7 @@
             <div class="strategy-toggle">
                 <button id="btn-momentum" class="toggle-btn active" onclick="switchView('momentum')">Momentum</button>
                 <button id="btn-reversion" class="toggle-btn" onclick="switchView('reversion')">Oversold</button>
+                <button id="btn-performance" class="toggle-btn" onclick="switchView('performance')">Performance</button>
             </div>
 
             <div id="market-regime-warning" class="regime-banner hidden">
@@ -71,6 +72,28 @@
             <div id="news-panel" class="news-panel hidden">
                 <h3 id="news-ticker-label">Latest News</h3>
                 <ul id="news-list"></ul>
+            </div>
+
+            <!-- Performance panel -->
+            <div id="performance-panel" class="hidden">
+                <div class="perf-metrics-grid" id="perf-metrics-grid"></div>
+                <table id="trade-log-table" class="hidden">
+                    <thead>
+                        <tr>
+                            <th>Ticker</th>
+                            <th>Strategy</th>
+                            <th>Entry</th>
+                            <th>Exit</th>
+                            <th>PnL %</th>
+                            <th>Status</th>
+                        </tr>
+                    </thead>
+                    <tbody id="trade-log-body"></tbody>
+                </table>
+                <div id="perf-empty" class="empty-state hidden">
+                    <p>No paper trades yet.</p>
+                    <p class="muted">Trades are recorded automatically after each daily pipeline run.</p>
+                </div>
             </div>
         </aside>
 

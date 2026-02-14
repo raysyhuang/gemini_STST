@@ -17,7 +17,7 @@ from contextlib import asynccontextmanager
 from datetime import date
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -28,6 +28,9 @@ from app.schemas import (
     BacktestResultResponse,
     MarketRegimeResponse,
     NewsArticle,
+    PaperMetricsResponse,
+    PaperTradesListResponse,
+    PaperTradeResponse,
     ReversionScreenerResponse,
     ReversionSignalResponse,
     ScreenerResponse,
@@ -174,12 +177,17 @@ async def reversion_today():
 
 
 @app.get("/api/backtest/{ticker}", response_model=BacktestResultResponse)
-async def backtest_ticker(ticker: str, strategy: str = "momentum"):
+async def backtest_ticker(
+    ticker: str,
+    strategy: str = "momentum",
+    years_back: int = Query(default=2, ge=1, le=5),
+):
     """
     Run (or retrieve) the VectorBT backtest for a single ticker.
 
     Query params:
       - strategy: "momentum" (default) or "reversion"
+      - years_back: 1-5 years of history (default 2)
 
     Returns win rate, profit factor, max drawdown, and the equity curve
     formatted for TradingView Lightweight Charts.
@@ -205,7 +213,8 @@ async def backtest_ticker(ticker: str, strategy: str = "momentum"):
 
     # Run the backtest (CPU-bound, offload to thread)
     result = await asyncio.to_thread(
-        run_single_ticker_backtest, symbol, strategy_type=strategy,
+        run_single_ticker_backtest, symbol,
+        years_back=years_back, strategy_type=strategy,
     )
 
     if result is None:
@@ -215,6 +224,52 @@ async def backtest_ticker(ticker: str, strategy: str = "momentum"):
         )
 
     return BacktestResultResponse(**result)
+
+
+# ------------------------------------------------------------------
+# Paper Trading
+# ------------------------------------------------------------------
+
+@app.get("/api/paper/metrics", response_model=PaperMetricsResponse)
+async def paper_metrics():
+    """Return aggregate performance metrics for all paper trades."""
+    from app.paper_tracker import get_paper_metrics
+
+    db = SessionLocal()
+    try:
+        metrics = get_paper_metrics(db)
+    finally:
+        db.close()
+
+    return PaperMetricsResponse(**metrics)
+
+
+@app.get("/api/paper/trades", response_model=PaperTradesListResponse)
+async def paper_trades(status: str = Query(default="all")):
+    """
+    Return paper trades with optional status filter.
+
+    Query params:
+      - status: "all" (default), "pending", "open", or "closed"
+    """
+    from app.paper_tracker import get_paper_trades
+
+    if status not in ("all", "pending", "open", "closed"):
+        raise HTTPException(
+            status_code=400,
+            detail="status must be 'all', 'pending', 'open', or 'closed'",
+        )
+
+    db = SessionLocal()
+    try:
+        trades = get_paper_trades(db, status=status)
+    finally:
+        db.close()
+
+    return PaperTradesListResponse(
+        total=len(trades),
+        trades=[PaperTradeResponse(**t) for t in trades],
+    )
 
 
 # ------------------------------------------------------------------
