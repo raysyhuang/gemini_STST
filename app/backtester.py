@@ -209,7 +209,7 @@ def _run_batch(
             if len(trades) > 0:
                 profits = trades.loc[trades["PnL"] > 0, "PnL"].sum()
                 losses = abs(trades.loc[trades["PnL"] < 0, "PnL"].sum())
-                profit_factor = round(profits / losses, 2) if losses > 0 else float("inf")
+                profit_factor = round(profits / losses, 2) if losses > 0 else 99.99
             else:
                 profit_factor = 0.0
 
