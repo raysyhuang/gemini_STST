@@ -64,6 +64,10 @@ class ScreenerSignal(Base):
     options_sentiment = Column(String(10))   # Bullish / Bearish / Neutral
     put_call_ratio = Column(Float)
 
+    # Signal quality & confluence (Phase 6)
+    quality_score = Column(Float)       # 0-100 composite score
+    confluence = Column(Boolean, default=False)  # True if dual-strategy overlap
+
     ticker = relationship("Ticker", back_populates="signals")
 
     __table_args__ = (
@@ -87,6 +91,10 @@ class ReversionSignal(Base):
     options_sentiment = Column(String(10))   # Bullish / Bearish / Neutral
     put_call_ratio = Column(Float)
 
+    # Signal quality & confluence (Phase 6)
+    quality_score = Column(Float)       # 0-100 composite score
+    confluence = Column(Boolean, default=False)  # True if dual-strategy overlap
+
     ticker = relationship("Ticker", back_populates="reversion_signals")
 
     __table_args__ = (
@@ -106,6 +114,7 @@ class PaperTrade(Base):
     entry_price = Column(Float)
     shares = Column(Float)
     position_size = Column(Float, default=1000.0)
+    quality_score = Column(Float)        # Signal quality score at entry (0-100)
 
     stop_level = Column(Float)
     highest_high_since_entry = Column(Float)

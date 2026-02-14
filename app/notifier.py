@@ -83,12 +83,26 @@ def _build_message(
             price = sig["trigger_price"]
             rvol = sig["rvol_at_trigger"]
             atr = sig["atr_pct_at_trigger"]
+            quality = sig.get("quality_score")
+            confluence = sig.get("confluence", False)
 
             sym_esc = _escape_md(sym)
-            lines.append(f"*{sym_esc}* — ${_escape_md(str(price))}")
+            badge = "\u2B50 " if confluence else ""
+            lines.append(f"{badge}*{sym_esc}* — ${_escape_md(str(price))}")
 
             flow_str = _format_flow(sig)
-            lines.append(f"  RVOL: {_escape_md(str(rvol))} \\| ATR: {_escape_md(str(atr))}% \\| {flow_str}")
+            quality_str = f"Q: {_escape_md(str(quality))}" if quality is not None else ""
+            detail_parts = [
+                f"RVOL: {_escape_md(str(rvol))}",
+                f"ATR: {_escape_md(str(atr))}%",
+                flow_str,
+            ]
+            if quality_str:
+                detail_parts.append(quality_str)
+            lines.append("  " + " \\| ".join(detail_parts))
+
+            if confluence:
+                lines.append(f"  {_escape_md('Confluence: recent reversion signal')}")
 
             articles = news_map.get(sym, [])
             for article in articles[:2]:
@@ -111,9 +125,25 @@ def _build_message(
             price_esc = _escape_md(str(sig["trigger_price"]))
             rsi_esc = _escape_md(str(sig["rsi2"]))
             dd_esc = _escape_md(str(sig["drawdown_3d_pct"]))
+            quality = sig.get("quality_score")
+            confluence = sig.get("confluence", False)
             flow_str = _format_flow(sig)
-            lines.append(f"*{sym_esc}* — ${price_esc}")
-            lines.append(f"  RSI\\(2\\): {rsi_esc} \\| 3d Drop: {dd_esc}% \\| {flow_str}")
+
+            badge = "\u2B50 " if confluence else ""
+            lines.append(f"{badge}*{sym_esc}* — ${price_esc}")
+
+            detail_parts = [
+                f"RSI\\(2\\): {rsi_esc}",
+                f"3d Drop: {dd_esc}%",
+                flow_str,
+            ]
+            if quality is not None:
+                detail_parts.append(f"Q: {_escape_md(str(quality))}")
+            lines.append("  " + " \\| ".join(detail_parts))
+
+            if confluence:
+                lines.append(f"  {_escape_md('Confluence: recent momentum signal')}")
+
             lines.append("")
 
     return "\n".join(lines)

@@ -32,7 +32,13 @@ REVERSION_HOLD_DAYS = 5
 REVERSION_STOP = 0.05       # 5% hard stop-loss
 SLIPPAGE = 0.002             # 20 bps
 FEES = 0.001                 # 0.1% each leg
-POSITION_SIZE = 1000.0       # $1,000 per trade (10% of $10K paper account)
+POSITION_SIZE = 1000.0       # $1,000 per trade (legacy flat sizing)
+
+# Volatility-scaled sizing
+ACCOUNT_SIZE = 10_000
+TARGET_RISK = 0.01           # 1% risk per trade
+MIN_SIZE = 0.05              # 5% floor
+MAX_SIZE = 0.20              # 20% cap
 
 
 # ── 1. Create Pending Trades ─────────────────────────────────────
@@ -70,11 +76,20 @@ def create_pending_trades(
         if existing:
             continue
 
+        # Compute vol-scaled position size from ATR%
+        atr_pct = sig.get("atr_pct_at_trigger", 10.0)
+        if atr_pct and atr_pct > 0:
+            scaled_frac = min(max(TARGET_RISK / (atr_pct / 100.0), MIN_SIZE), MAX_SIZE)
+        else:
+            scaled_frac = 0.10  # fallback
+        pos_size = round(ACCOUNT_SIZE * scaled_frac, 2)
+
         trade = PaperTrade(
             ticker_id=ticker_id,
             strategy=strategy,
             signal_date=signal_date,
-            position_size=POSITION_SIZE,
+            position_size=pos_size,
+            quality_score=sig.get("quality_score"),
             status="pending",
         )
         db.add(trade)
@@ -124,7 +139,7 @@ def fill_pending_trades(db: Session) -> int:
 
         # Entry at T+1 open + slippage
         entry_price = round(next_day.open * (1 + SLIPPAGE), 4)
-        shares = round(POSITION_SIZE / entry_price, 4)
+        shares = round(trade.position_size / entry_price, 4)
 
         trade.entry_date = next_day.date
         trade.entry_price = entry_price
@@ -468,6 +483,7 @@ def get_paper_trades(db: Session, status: str | None = None) -> list[dict]:
             "entry_price": trade.entry_price,
             "shares": trade.shares,
             "position_size": trade.position_size,
+            "quality_score": trade.quality_score,
             "stop_level": trade.stop_level,
             "planned_exit_date": trade.planned_exit_date,
             "actual_exit_date": trade.actual_exit_date,

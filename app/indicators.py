@@ -81,6 +81,22 @@ def compute_adv(df: pd.DataFrame, period: int = 20) -> pd.Series:
     return df["volume"].rolling(window=period, min_periods=period).mean()
 
 
+def compute_vol_scaled_size(
+    atr_pct_series: pd.Series,
+    target_risk: float = 0.01,
+    min_size: float = 0.05,
+    max_size: float = 0.20,
+) -> pd.Series:
+    """
+    Position size as fraction of equity, scaled inversely to ATR%.
+
+    Equal-risk sizing: position_pct = target_risk / (ATR% / 100)
+    Capped between min_size (5%) and max_size (20%).
+    """
+    raw = target_risk / (atr_pct_series / 100.0)
+    return raw.clip(min_size, max_size)
+
+
 def add_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """
     Attach all indicator columns to a single-ticker OHLCV DataFrame (in-place).

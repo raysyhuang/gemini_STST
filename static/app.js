@@ -58,6 +58,13 @@ window.addEventListener('resize', () => {
 let screenerData = null;    // Cached momentum screener response
 let reversionData = null;   // Cached reversion screener response
 let activeView = 'momentum'; // 'momentum' | 'reversion' | 'performance'
+let minQualityFilter = 0;   // Quality score filter threshold
+
+// ---- Vol-Scaled Sizing Constants (match backtester) ----
+const ACCOUNT_SIZE = 10000;
+const TARGET_RISK = 0.01;
+const MIN_SIZE = 0.05;
+const MAX_SIZE = 0.20;
 
 // ---- DOM references ----
 const panelTitle     = document.getElementById('panel-title');
@@ -101,6 +108,10 @@ function switchView(view) {
     newsPanel.classList.add('hidden');
     screenerEmpty.classList.add('hidden');
 
+    // Show/hide quality filter (only for signal views)
+    const qualityFilter = document.getElementById('quality-filter');
+    qualityFilter.classList.toggle('hidden', view === 'performance');
+
     // Update panel title and show relevant content
     if (view === 'momentum') {
         panelTitle.textContent = 'Momentum Triggers';
@@ -112,6 +123,50 @@ function switchView(view) {
         panelTitle.textContent = 'Paper Trading';
         perfPanel.classList.remove('hidden');
         fetchPerformanceData();
+    }
+}
+
+// ---- Quality Score + Confluence helpers ----
+
+function formatQualityScore(score) {
+    if (score == null) return '--';
+    let color;
+    if (score >= 70) color = 'var(--green, #3fb950)';
+    else if (score >= 40) color = 'var(--yellow, #d29922)';
+    else color = 'var(--text-muted, #8b949e)';
+    return `<span style="color:${color};font-weight:600">${score.toFixed(0)}</span>`;
+}
+
+function formatTicker(stock) {
+    const sym = stock.ticker;
+    if (stock.confluence) {
+        return `<span class="confluence-badge" title="Dual-strategy confluence">\u2B50</span> ${sym}`;
+    }
+    return sym;
+}
+
+// ---- Vol-Scaled Position Size ----
+
+function computePositionSize(atrPct) {
+    if (!atrPct || atrPct <= 0) return ACCOUNT_SIZE * 0.10;
+    const frac = Math.min(Math.max(TARGET_RISK / (atrPct / 100), MIN_SIZE), MAX_SIZE);
+    return Math.round(ACCOUNT_SIZE * frac);
+}
+
+function formatPositionSize(atrPct) {
+    const size = computePositionSize(atrPct);
+    return `$${size.toLocaleString()}`;
+}
+
+// ---- Quality Filter ----
+
+function onQualityFilterChange() {
+    const select = document.getElementById('min-quality-select');
+    minQualityFilter = parseFloat(select.value) || 0;
+    if (activeView === 'momentum') {
+        renderMomentumSignals();
+    } else if (activeView === 'reversion') {
+        renderReversionSignals();
     }
 }
 
@@ -170,21 +225,36 @@ function renderMomentumSignals() {
         return;
     }
 
+    // Apply quality filter
+    const filtered = screenerData.signals.filter(
+        s => (s.quality_score || 0) >= minQualityFilter
+    );
+
+    if (filtered.length === 0) {
+        screenerTable.classList.add('hidden');
+        screenerEmpty.classList.remove('hidden');
+        return;
+    }
+
     screenerEmpty.classList.add('hidden');
     screenerTable.classList.remove('hidden');
     screenerBody.innerHTML = '';
 
-    screenerData.signals.forEach((stock, idx) => {
+    filtered.forEach((stock, idx) => {
+        const origIdx = screenerData.signals.indexOf(stock);
         const tr = document.createElement('tr');
-        tr.dataset.idx = idx;
+        tr.dataset.idx = origIdx;
+        if (stock.confluence) tr.classList.add('confluence-row');
         tr.innerHTML = `
-            <td>${stock.ticker}</td>
+            <td>${formatTicker(stock)}</td>
+            <td>${formatQualityScore(stock.quality_score)}</td>
             <td>${stock.rvol_at_trigger.toFixed(2)}</td>
             <td>${stock.atr_pct_at_trigger.toFixed(1)}%</td>
+            <td>${formatPositionSize(stock.atr_pct_at_trigger)}</td>
             <td>${formatFlow(stock)}</td>
             <td>$${stock.trigger_price.toFixed(2)}</td>
         `;
-        tr.addEventListener('click', () => onMomentumClick(idx));
+        tr.addEventListener('click', () => onMomentumClick(origIdx));
         screenerBody.appendChild(tr);
     });
 }
@@ -228,21 +298,38 @@ function renderReversionSignals() {
         return;
     }
 
+    // Apply quality filter
+    const filtered = reversionData.signals.filter(
+        s => (s.quality_score || 0) >= minQualityFilter
+    );
+
+    if (filtered.length === 0) {
+        reversionTable.classList.add('hidden');
+        screenerEmpty.classList.remove('hidden');
+        return;
+    }
+
     screenerEmpty.classList.add('hidden');
     reversionTable.classList.remove('hidden');
     reversionBody.innerHTML = '';
 
-    reversionData.signals.forEach((stock, idx) => {
+    filtered.forEach((stock, idx) => {
+        const origIdx = reversionData.signals.indexOf(stock);
         const tr = document.createElement('tr');
-        tr.dataset.idx = idx;
+        tr.dataset.idx = origIdx;
+        if (stock.confluence) tr.classList.add('confluence-row');
+        // Reversion signals need atr_pct for sizing; use a default if not present
+        const atrPct = stock.atr_pct_at_trigger || 10;
         tr.innerHTML = `
-            <td>${stock.ticker}</td>
+            <td>${formatTicker(stock)}</td>
+            <td>${formatQualityScore(stock.quality_score)}</td>
             <td>${stock.rsi2.toFixed(1)}</td>
             <td>${stock.drawdown_3d_pct.toFixed(1)}%</td>
+            <td>${formatPositionSize(atrPct)}</td>
             <td>${formatFlow(stock)}</td>
             <td>$${stock.trigger_price.toFixed(2)}</td>
         `;
-        tr.addEventListener('click', () => onReversionClick(idx));
+        tr.addEventListener('click', () => onReversionClick(origIdx));
         reversionBody.appendChild(tr);
     });
 }
@@ -315,6 +402,7 @@ async function loadBacktest(ticker, strategy = 'momentum') {
         document.getElementById('max-drawdown').textContent   = data.max_drawdown_pct.toFixed(1);
         document.getElementById('total-trades').textContent   = data.total_trades;
         document.getElementById('total-return').textContent   = data.total_return_pct.toFixed(1);
+        document.getElementById('avg-pos-size').textContent   = data.avg_position_size_pct.toFixed(1);
 
         // Color-code return
         const retEl = document.getElementById('total-return').parentElement;
@@ -403,9 +491,14 @@ function renderTradeLog(trades) {
         if (t.status === 'open') badgeClass = 'status-open';
         else if (t.status === 'closed') badgeClass = 'status-closed';
 
+        const sizeStr = t.position_size != null ? `$${t.position_size.toFixed(0)}` : '--';
+        const qScore = t.quality_score != null ? formatQualityScore(t.quality_score) : '--';
+
         tr.innerHTML = `
             <td>${t.ticker}</td>
             <td><span class="strategy-badge strategy-${t.strategy}">${t.strategy}</span></td>
+            <td>${qScore}</td>
+            <td>${sizeStr}</td>
             <td>${entryStr}</td>
             <td>${exitStr}</td>
             <td class="${pnlClass}">${pnlVal}</td>

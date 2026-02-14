@@ -22,6 +22,8 @@ class SignalResponse(BaseModel):
     atr_pct_at_trigger: float
     options_sentiment: str | None = None
     put_call_ratio: float | None = None
+    quality_score: float | None = None
+    confluence: bool = False
     news: list[NewsArticle] = []
 
     model_config = {"from_attributes": True}
@@ -47,8 +49,11 @@ class ReversionSignalResponse(BaseModel):
     rsi2: float
     drawdown_3d_pct: float
     sma_distance_pct: float
+    atr_pct_at_trigger: float | None = None
     options_sentiment: str | None = None
     put_call_ratio: float | None = None
+    quality_score: float | None = None
+    confluence: bool = False
 
     model_config = {"from_attributes": True}
 
@@ -65,6 +70,7 @@ class BacktestResultResponse(BaseModel):
     total_return_pct: float
     max_drawdown_pct: float
     total_trades: int
+    avg_position_size_pct: float = 10.0
     equity_curve: list[dict[str, Any]]
 
 
@@ -79,6 +85,7 @@ class PaperTradeResponse(BaseModel):
     entry_price: Optional[float] = None
     shares: Optional[float] = None
     position_size: float
+    quality_score: Optional[float] = None
     stop_level: Optional[float] = None
     planned_exit_date: Optional[date] = None
     actual_exit_date: Optional[date] = None

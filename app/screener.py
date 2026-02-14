@@ -32,6 +32,9 @@ MIN_ADV = 1_500_000
 MIN_ATR_PCT = 8.0
 MIN_RVOL = 2.0
 
+# Confluence detection lookback
+CONFLUENCE_LOOKBACK_DAYS = 14
+
 # We need at least 30 trading days of history to compute 20-day indicators reliably
 LOOKBACK_CALENDAR_DAYS = 60
 
@@ -190,6 +193,9 @@ def run_screener(
             if latest["close"] <= latest["open"]:
                 continue
 
+            # Compute momentum quality score (0-100)
+            quality = _compute_momentum_quality(latest)
+
             signals.append({
                 "ticker_id": tkr.id,
                 "symbol": tkr.symbol,
@@ -198,7 +204,12 @@ def run_screener(
                 "trigger_price": round(float(latest["close"]), 2),
                 "rvol_at_trigger": round(float(latest["rvol"]), 2),
                 "atr_pct_at_trigger": round(float(latest["atr_pct"]), 1),
+                "quality_score": quality,
+                "confluence": False,  # set later by _detect_confluence
             })
+
+        # Sort by quality score descending (strongest first)
+        signals.sort(key=lambda s: s["quality_score"], reverse=True)
 
         logger.info(
             "Screener found %d signals on %s (skipped: %d cooldown, %d earnings)",
@@ -219,6 +230,87 @@ def run_screener(
     }
 
 
+def _compute_momentum_quality(latest: pd.Series) -> float:
+    """
+    Compute a 0-100 composite quality score for a momentum signal.
+
+    Components (weighted):
+      - RVOL strength:   35%  (2.0 → 0, 5.0 → 100)
+      - ATR% strength:   25%  (8% → 0, 20% → 100)
+      - Trend strength:  20%  (close/SMA20 - 1: 0% → 0, 5% → 100)
+      - Candle strength:  20%  (body%: 0% → 0, 3% → 100)
+    """
+    def _clamp(val):
+        return max(0.0, min(100.0, val))
+
+    rvol = float(latest["rvol"])
+    atr_pct = float(latest["atr_pct"])
+    close = float(latest["close"])
+    open_ = float(latest["open"])
+    sma20 = float(latest["sma_20"])
+
+    rvol_score = _clamp((rvol - 2.0) / 3.0 * 100)
+    atr_score = _clamp((atr_pct - 8.0) / 12.0 * 100)
+    trend_score = _clamp(((close / sma20) - 1) / 0.05 * 100)
+    candle_score = _clamp((close - open_) / open_ / 0.03 * 100)
+
+    quality = (
+        rvol_score * 0.35
+        + atr_score * 0.25
+        + trend_score * 0.20
+        + candle_score * 0.20
+    )
+    return round(quality, 1)
+
+
+def _detect_confluence(
+    db: Session,
+    momentum_signals: list[dict],
+    reversion_signals: list[dict],
+    lookback_days: int = CONFLUENCE_LOOKBACK_DAYS,
+) -> None:
+    """
+    Flag signals whose ticker appears in both strategies recently.
+
+    Mutates signal dicts in-place, setting confluence=True where a
+    momentum signal ticker had a reversion signal in the last N days
+    (or vice versa). This "bounce-to-breakout" pattern indicates
+    high conviction.
+    """
+    cutoff = date.today() - timedelta(days=lookback_days)
+
+    # Recent reversion tickers from DB
+    recent_rev_rows = db.execute(
+        text("SELECT DISTINCT ticker_id FROM reversion_signals WHERE date >= :since"),
+        {"since": cutoff},
+    )
+    recent_rev = {row[0] for row in recent_rev_rows}
+
+    # Recent momentum tickers from DB
+    recent_mom_rows = db.execute(
+        text("SELECT DISTINCT ticker_id FROM screener_signals WHERE date >= :since"),
+        {"since": cutoff},
+    )
+    recent_mom = {row[0] for row in recent_mom_rows}
+
+    # Also include today's signals (not yet persisted)
+    today_rev = {s["ticker_id"] for s in reversion_signals}
+    today_mom = {s["ticker_id"] for s in momentum_signals}
+
+    all_rev = recent_rev | today_rev
+    all_mom = recent_mom | today_mom
+
+    # Flag momentum signals that overlap with recent reversion
+    for sig in momentum_signals:
+        if sig["ticker_id"] in all_rev:
+            sig["confluence"] = True
+
+    # Flag reversion signals that overlap with recent momentum
+    for sig in reversion_signals:
+        if sig["ticker_id"] in all_mom:
+            sig["confluence"] = True
+
+
 def _save_signals(db: Session, signals: list[dict]) -> None:
     """Upsert screener signals into Postgres."""
     from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -235,6 +327,8 @@ def _save_signals(db: Session, signals: list[dict]) -> None:
             "atr_pct_at_trigger": s["atr_pct_at_trigger"],
             "options_sentiment": s.get("options_sentiment"),
             "put_call_ratio": s.get("put_call_ratio"),
+            "quality_score": s.get("quality_score"),
+            "confluence": s.get("confluence", False),
         }
         for s in signals
     ]
@@ -248,6 +342,8 @@ def _save_signals(db: Session, signals: list[dict]) -> None:
             "atr_pct_at_trigger": stmt.excluded.atr_pct_at_trigger,
             "options_sentiment": stmt.excluded.options_sentiment,
             "put_call_ratio": stmt.excluded.put_call_ratio,
+            "quality_score": stmt.excluded.quality_score,
+            "confluence": stmt.excluded.confluence,
         },
     )
     db.execute(stmt)
@@ -296,10 +392,17 @@ async def run_daily_pipeline(screen_date: date | None = None) -> dict:
     from app.mean_reversion import run_reversion_screener
     reversion_result = run_reversion_screener(screen_date)
 
+    # Step 2c: Detect dual-strategy confluence (bounce-to-breakout)
+    rev_signals = reversion_result.get("signals", [])
+    db = SessionLocal()
+    try:
+        _detect_confluence(db, signals, rev_signals)
+    finally:
+        db.close()
+
     # Step 3: Fetch options sentiment for ALL signal tickers (momentum + reversion)
     from app.options_flow import fetch_options_sentiment_batch
 
-    rev_signals = reversion_result.get("signals", [])
     all_signal_symbols = list({s["symbol"] for s in signals} | {s["symbol"] for s in rev_signals})
     options_map = await fetch_options_sentiment_batch(all_signal_symbols)
 
@@ -393,10 +496,12 @@ if __name__ == "__main__":
         logger.info("=== Done — Regime: %s | Signals: %d ===", regime, n)
 
         for s in result["signals"]:
+            conf = " *CONFLUENCE*" if s.get("confluence") else ""
             logger.info(
-                "  %s  $%.2f  RVOL=%.2f  ATR%%=%.1f",
+                "  %s  $%.2f  RVOL=%.2f  ATR%%=%.1f  Q=%.0f%s",
                 s["symbol"], s["trigger_price"],
                 s["rvol_at_trigger"], s["atr_pct_at_trigger"],
+                s.get("quality_score", 0), conf,
             )
 
     asyncio.run(_main())

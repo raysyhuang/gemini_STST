@@ -32,14 +32,19 @@ from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
 from app.models import Ticker, DailyMarketData
-from app.indicators import compute_atr_pct, compute_rvol, compute_rsi
+from app.indicators import compute_atr_pct, compute_rvol, compute_rsi, compute_vol_scaled_size
 
 logger = logging.getLogger(__name__)
 
-BATCH_SIZE = 500
+BATCH_SIZE = 250
 FEES = 0.001        # 0.1% round-trip commissions
 SLIPPAGE = 0.002    # 20 bps per side — realistic for small-cap spreads
-SIZE = 0.10         # 10% of equity per trade (fixed-fractional sizing)
+SIZE = 0.10         # 10% of equity per trade (legacy flat sizing, unused)
+
+# Volatility-scaled position sizing
+TARGET_RISK = 0.01   # 1% risk per trade
+MIN_SIZE = 0.05      # 5% floor
+MAX_SIZE = 0.20      # 20% cap
 
 # Momentum strategy
 MOMENTUM_HOLD_DAYS = 7
@@ -138,6 +143,9 @@ def _run_batch(
     if price_df.empty:
         return []
 
+    # Compute vol-scaled position sizes (DataFrame aligned with atr_pct_df)
+    vol_size_df = compute_vol_scaled_size(atr_pct_df, TARGET_RISK, MIN_SIZE, MAX_SIZE)
+
     # Build entry/exit signals and run portfolio based on strategy
     if strategy_type == "reversion":
         # Mean Reversion: RSI(2) < 10 AND 3-day drawdown >= 15%
@@ -155,7 +163,7 @@ def _run_batch(
             fees=FEES,
             slippage=SLIPPAGE,
             init_cash=10_000,
-            size=SIZE,
+            size=vol_size_df,
             size_type="percent",
             accumulate=False,
         )
@@ -181,7 +189,7 @@ def _run_batch(
             fees=FEES,
             slippage=SLIPPAGE,
             init_cash=10_000,
-            size=SIZE,
+            size=vol_size_df,
             size_type="percent",
             accumulate=False,
         )
@@ -231,6 +239,12 @@ def _run_batch(
                 f = float(v)
                 return round(f, decimals) if not np.isnan(f) else 0.0
 
+            # Average position size (% of equity) from vol-scaling
+            if ticker_col in vol_size_df.columns:
+                avg_pos_size = round(float(vol_size_df[ticker_col].mean()) * 100, 1)
+            else:
+                avg_pos_size = round(float(vol_size_df.mean().mean()) * 100, 1)
+
             results.append({
                 "ticker": ticker_col,
                 "total_return_pct": _safe(total_return),
@@ -238,6 +252,7 @@ def _run_batch(
                 "win_rate": _safe(win_rate, 1),
                 "profit_factor": profit_factor,
                 "total_trades": len(trades),
+                "avg_position_size_pct": avg_pos_size,
                 "equity_curve": equity_curve,
             })
         except Exception as e:

@@ -97,23 +97,30 @@ async def root():
 
 
 @app.get("/api/screener/today", response_model=ScreenerResponse)
-async def screener_today():
+async def screener_today(
+    min_quality: float = Query(default=0, ge=0, le=100),
+):
     """
     Return today's screener signals from Postgres, enriched with
     the 3 most recent Finnhub news headlines per ticker.
+
+    Query params:
+      - min_quality: minimum quality score to include (0-100, default 0)
     """
     db = SessionLocal()
     try:
         today = date.today()
 
-        # Pull today's signals joined with ticker info
-        rows = (
+        # Pull today's signals joined with ticker info, sorted by quality score
+        query = (
             db.query(ScreenerSignal, Ticker)
             .join(Ticker, ScreenerSignal.ticker_id == Ticker.id)
             .filter(ScreenerSignal.date == today)
-            .order_by(ScreenerSignal.atr_pct_at_trigger.desc())
-            .all()
+            .order_by(ScreenerSignal.quality_score.desc().nullslast())
         )
+        if min_quality > 0:
+            query = query.filter(ScreenerSignal.quality_score >= min_quality)
+        rows = query.all()
 
         # Build signal list
         signals: list[dict] = []
@@ -127,6 +134,8 @@ async def screener_today():
                 "atr_pct_at_trigger": signal.atr_pct_at_trigger,
                 "options_sentiment": signal.options_sentiment,
                 "put_call_ratio": signal.put_call_ratio,
+                "quality_score": signal.quality_score,
+                "confluence": signal.confluence or False,
                 "news": [],  # populated below
             })
 
@@ -151,14 +160,24 @@ async def screener_today():
 
 
 @app.get("/api/reversion/today", response_model=ReversionScreenerResponse)
-async def reversion_today():
+async def reversion_today(
+    min_quality: float = Query(default=0, ge=0, le=100),
+):
     """
     Return today's mean-reversion (oversold bounce) signals.
     Criteria: RSI(2) < 10, 3-day drawdown >= 15%, Close > SMA-200.
+
+    Query params:
+      - min_quality: minimum quality score to include (0-100, default 0)
     """
     from app.mean_reversion import run_reversion_screener
 
     result = await asyncio.to_thread(run_reversion_screener)
+
+    filtered = [
+        s for s in result["signals"]
+        if min_quality <= 0 or (s.get("quality_score") or 0) >= min_quality
+    ]
 
     return ReversionScreenerResponse(
         date=result["date"],
@@ -170,9 +189,12 @@ async def reversion_today():
             rsi2=s["rsi2"],
             drawdown_3d_pct=s["drawdown_3d_pct"],
             sma_distance_pct=s["sma_distance_pct"],
+            atr_pct_at_trigger=s.get("atr_pct_at_trigger"),
             options_sentiment=s.get("options_sentiment"),
             put_call_ratio=s.get("put_call_ratio"),
-        ) for s in result["signals"]],
+            quality_score=s.get("quality_score"),
+            confluence=s.get("confluence", False),
+        ) for s in filtered],
     )
 
 

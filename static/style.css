@@ -533,3 +533,51 @@ html, body {
     background: rgba(63,185,80,0.12);
     color: var(--green);
 }
+
+/* ---- Confluence & Quality Score ---- */
+
+.confluence-badge {
+    font-size: 12px;
+    margin-right: 2px;
+}
+
+.confluence-row {
+    border-left: 2px solid var(--orange);
+}
+
+.confluence-row td:first-child {
+    padding-left: 6px;
+}
+
+/* ---- Quality Filter ---- */
+
+.quality-filter {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 20px 0;
+}
+
+.quality-filter label {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-muted);
+}
+
+.quality-filter select {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    padding: 4px 8px;
+    background: var(--bg-elevated);
+    color: var(--text-primary);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    cursor: pointer;
+    outline: none;
+}
+
+.quality-filter select:focus {
+    border-color: var(--accent);
+}

@@ -57,6 +57,13 @@ def _migrate_new_columns(engine):
         "ALTER TABLE screener_signals ADD COLUMN IF NOT EXISTS put_call_ratio FLOAT",
         "ALTER TABLE reversion_signals ADD COLUMN IF NOT EXISTS options_sentiment VARCHAR(10)",
         "ALTER TABLE reversion_signals ADD COLUMN IF NOT EXISTS put_call_ratio FLOAT",
+        # Phase 6: Quality scoring & confluence columns
+        "ALTER TABLE screener_signals ADD COLUMN IF NOT EXISTS quality_score FLOAT",
+        "ALTER TABLE screener_signals ADD COLUMN IF NOT EXISTS confluence BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE reversion_signals ADD COLUMN IF NOT EXISTS quality_score FLOAT",
+        "ALTER TABLE reversion_signals ADD COLUMN IF NOT EXISTS confluence BOOLEAN DEFAULT FALSE",
+        # Phase 6: Paper trade quality score
+        "ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS quality_score FLOAT",
     ]
     with engine.connect() as conn:
         for sql in migrations:

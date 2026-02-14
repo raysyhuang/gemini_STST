@@ -26,6 +26,17 @@
                 <button id="btn-performance" class="toggle-btn" onclick="switchView('performance')">Performance</button>
             </div>
 
+            <!-- Quality filter -->
+            <div id="quality-filter" class="quality-filter">
+                <label for="min-quality-select">Min Quality</label>
+                <select id="min-quality-select" onchange="onQualityFilterChange()">
+                    <option value="0" selected>All</option>
+                    <option value="25">25+</option>
+                    <option value="50">50+</option>
+                    <option value="70">70+</option>
+                </select>
+            </div>
+
             <div id="market-regime-warning" class="regime-banner hidden">
                 <span class="regime-icon">&#9888;</span>
                 <span class="regime-text">Bearish Regime &mdash; Proceed with caution</span>
@@ -45,8 +56,10 @@
                 <thead>
                     <tr>
                         <th>Ticker</th>
+                        <th>Score</th>
                         <th>RVOL</th>
                         <th>ATR %</th>
+                        <th>Size</th>
                         <th>Flow</th>
                         <th>Price</th>
                     </tr>
@@ -59,8 +72,10 @@
                 <thead>
                     <tr>
                         <th>Ticker</th>
+                        <th>Score</th>
                         <th>RSI(2)</th>
                         <th>3d Drop</th>
+                        <th>Size</th>
                         <th>Flow</th>
                         <th>Price</th>
                     </tr>
@@ -82,6 +97,8 @@
                         <tr>
                             <th>Ticker</th>
                             <th>Strategy</th>
+                            <th>Score</th>
+                            <th>Size</th>
                             <th>Entry</th>
                             <th>Exit</th>
                             <th>PnL %</th>
@@ -121,6 +138,10 @@
                     <div class="metric-card">
                         <span class="metric-label">Total Return</span>
                         <span class="metric-value"><span id="total-return">--</span>%</span>
+                    </div>
+                    <div class="metric-card">
+                        <span class="metric-label">Avg Size</span>
+                        <span class="metric-value"><span id="avg-pos-size">--</span>%</span>
                     </div>
                 </div>
             </header>
