@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>QuantScreener Dashboard</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <script src="https://unpkg.com/lightweight-charts@3.8.0/dist/lightweight-charts.standalone.production.js"></script>
+</head>
+<body>
+    <div class="dashboard-container">
+        <!-- ===== LEFT SIDEBAR: Screener Panel ===== -->
+        <aside class="screener-panel">
+            <div class="panel-header">
+                <h2>Momentum Triggers</h2>
+                <span id="screener-date" class="date-badge"></span>
+            </div>
+
+            <div id="market-regime-warning" class="regime-banner hidden">
+                <span class="regime-icon">&#9888;</span>
+                <span class="regime-text">Bearish Regime &mdash; Proceed with caution</span>
+            </div>
+            <div id="market-regime-bullish" class="regime-banner regime-bullish hidden">
+                <span class="regime-icon">&#9650;</span>
+                <span class="regime-text">Bullish Regime &mdash; SPY &amp; QQQ above SMA-20</span>
+            </div>
+
+            <div id="screener-empty" class="empty-state">
+                <p>No signals today.</p>
+                <p class="muted">The screener runs daily after market close.</p>
+            </div>
+
+            <table id="screener-table" class="hidden">
+                <thead>
+                    <tr>
+                        <th>Ticker</th>
+                        <th>RVOL</th>
+                        <th>ATR %</th>
+                        <th>Price</th>
+                    </tr>
+                </thead>
+                <tbody id="screener-body"></tbody>
+            </table>
+
+            <!-- News panel (populated when a row is clicked) -->
+            <div id="news-panel" class="news-panel hidden">
+                <h3 id="news-ticker-label">Latest News</h3>
+                <ul id="news-list"></ul>
+            </div>
+        </aside>
+
+        <!-- ===== MAIN: Chart Panel ===== -->
+        <main class="chart-panel">
+            <header class="ticker-header">
+                <h1 id="active-ticker">Select a Ticker</h1>
+                <div class="metrics-grid">
+                    <div class="metric-card">
+                        <span class="metric-label">Win Rate</span>
+                        <span class="metric-value"><span id="win-rate">--</span>%</span>
+                    </div>
+                    <div class="metric-card">
+                        <span class="metric-label">Profit Factor</span>
+                        <span class="metric-value" id="profit-factor">--</span>
+                    </div>
+                    <div class="metric-card">
+                        <span class="metric-label">Max Drawdown</span>
+                        <span class="metric-value"><span id="max-drawdown">--</span>%</span>
+                    </div>
+                    <div class="metric-card">
+                        <span class="metric-label">Total Trades</span>
+                        <span class="metric-value" id="total-trades">--</span>
+                    </div>
+                    <div class="metric-card">
+                        <span class="metric-label">Total Return</span>
+                        <span class="metric-value"><span id="total-return">--</span>%</span>
+                    </div>
+                </div>
+            </header>
+
+            <div id="chart-placeholder" class="chart-placeholder">
+                <p>Click a ticker to load its 2-year backtest equity curve</p>
+            </div>
+            <div id="tvchart"></div>
+
+            <div id="loading-overlay" class="loading-overlay hidden">
+                <div class="spinner"></div>
+                <p>Running backtest&hellip;</p>
+            </div>
+        </main>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
