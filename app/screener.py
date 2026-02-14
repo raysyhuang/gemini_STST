@@ -17,13 +17,12 @@ import logging
 from datetime import date, timedelta
 
 import pandas as pd
-from sqlalchemy import select
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
 from app.models import Ticker, DailyMarketData, ScreenerSignal
 from app.indicators import add_all_indicators, check_market_regime
-from app.data_fetcher import fetch_ohlcv_batch, upsert_tickers, bulk_upsert_ohlcv
 
 logger = logging.getLogger(__name__)
 
@@ -36,38 +35,62 @@ MIN_RVOL = 2.0
 # We need at least 30 trading days of history to compute 20-day indicators reliably
 LOOKBACK_CALENDAR_DAYS = 60
 
+# Signal cooldown: suppress repeats for 5 trading days
+COOLDOWN_CALENDAR_DAYS = 7  # ~5 trading days
 
-def _load_ohlcv_for_ticker(db: Session, ticker_id: int, since: date) -> pd.DataFrame:
-    """Pull OHLCV rows for a single ticker from Postgres into a DataFrame."""
-    rows = (
-        db.query(DailyMarketData)
-        .filter(
-            DailyMarketData.ticker_id == ticker_id,
-            DailyMarketData.date >= since,
-        )
-        .order_by(DailyMarketData.date.asc())
-        .all()
-    )
+
+def _load_all_ohlcv(db: Session, ticker_ids: list[int], since: date) -> pd.DataFrame:
+    """
+    Batch-load OHLCV for ALL ticker_ids in a single SQL query.
+    Returns a long-format DataFrame with columns:
+        ticker_id, date, open, high, low, close, volume
+    """
+    if not ticker_ids:
+        return pd.DataFrame()
+
+    stmt = text("""
+        SELECT ticker_id, date, open, high, low, close, volume
+        FROM daily_market_data
+        WHERE ticker_id = ANY(:ids)
+          AND date >= :since
+        ORDER BY ticker_id, date ASC
+    """)
+    result = db.execute(stmt, {"ids": ticker_ids, "since": since})
+    rows = result.fetchall()
     if not rows:
         return pd.DataFrame()
 
-    data = [
-        {
-            "date": r.date,
-            "open": r.open,
-            "high": r.high,
-            "low": r.low,
-            "close": r.close,
-            "volume": r.volume,
-        }
-        for r in rows
-    ]
-    return pd.DataFrame(data)
+    return pd.DataFrame(
+        rows,
+        columns=["ticker_id", "date", "open", "high", "low", "close", "volume"],
+    )
 
 
-def run_screener(screen_date: date | None = None) -> dict:
+def _load_recent_signal_tickers(db: Session, since: date) -> set[int]:
+    """
+    Return the set of ticker_ids that already fired a signal
+    within the cooldown window. Used for 5-day deduplication.
+    """
+    stmt = text("""
+        SELECT DISTINCT ticker_id
+        FROM screener_signals
+        WHERE date >= :since
+    """)
+    result = db.execute(stmt, {"since": since})
+    return {row[0] for row in result.fetchall()}
+
+
+def run_screener(
+    screen_date: date | None = None,
+    earnings_blacklist: set[str] | None = None,
+) -> dict:
     """
     Execute the full screener for a given date (defaults to today).
+
+    Args:
+        screen_date: The date to screen (defaults to today).
+        earnings_blacklist: Set of symbols with earnings within the
+            7-day hold window. These are skipped to avoid binary event risk.
 
     Returns:
         {
@@ -80,36 +103,67 @@ def run_screener(screen_date: date | None = None) -> dict:
 
     if screen_date is None:
         screen_date = date.today()
+    if earnings_blacklist is None:
+        earnings_blacklist = set()
 
     lookback_start = screen_date - timedelta(days=LOOKBACK_CALENDAR_DAYS)
+    cooldown_start = screen_date - timedelta(days=COOLDOWN_CALENDAR_DAYS)
 
     db = SessionLocal()
     try:
-        # --- Market Regime Check (SPY + QQQ) ---
-        spy_ticker = db.query(Ticker).filter(Ticker.symbol == "SPY").first()
-        qqq_ticker = db.query(Ticker).filter(Ticker.symbol == "QQQ").first()
+        # --- Load all active tickers ---
+        all_tickers = db.query(Ticker).filter(Ticker.is_active.is_(True)).all()
+        ticker_map = {t.id: t for t in all_tickers}
+        ticker_ids = list(ticker_map.keys())
+        logger.info("Screening %d active tickers for %s", len(all_tickers), screen_date)
 
+        # --- P1 FIX: Batch load ALL OHLCV in one query ---
+        all_ohlcv = _load_all_ohlcv(db, ticker_ids, lookback_start)
+        logger.info("Loaded %d OHLCV rows in single batch query", len(all_ohlcv))
+
+        # --- Market Regime Check (SPY + QQQ) ---
         regime_info = {"regime": "Unknown", "spy_above_sma20": None, "qqq_above_sma20": None}
-        if spy_ticker and qqq_ticker:
-            spy_df = _load_ohlcv_for_ticker(db, spy_ticker.id, lookback_start)
-            qqq_df = _load_ohlcv_for_ticker(db, qqq_ticker.id, lookback_start)
+        spy_tkr = next((t for t in all_tickers if t.symbol == "SPY"), None)
+        qqq_tkr = next((t for t in all_tickers if t.symbol == "QQQ"), None)
+        if spy_tkr and qqq_tkr and not all_ohlcv.empty:
+            spy_df = all_ohlcv[all_ohlcv["ticker_id"] == spy_tkr.id].copy()
+            qqq_df = all_ohlcv[all_ohlcv["ticker_id"] == qqq_tkr.id].copy()
             if len(spy_df) >= 20 and len(qqq_df) >= 20:
                 regime_info = check_market_regime(spy_df, qqq_df)
 
         if regime_info["regime"] == "Bearish":
             logger.warning("BEARISH REGIME detected — SPY & QQQ below 20-day SMA")
 
-        # --- Screen all active tickers ---
-        all_tickers = db.query(Ticker).filter(Ticker.is_active.is_(True)).all()
-        logger.info("Screening %d active tickers for %s", len(all_tickers), screen_date)
+        # --- P1 FIX: Load cooldown set (tickers that signaled recently) ---
+        cooldown_tickers = _load_recent_signal_tickers(db, cooldown_start)
+        logger.info("Cooldown: %d tickers signaled in last %d days",
+                     len(cooldown_tickers), COOLDOWN_CALENDAR_DAYS)
 
+        # --- Screen each ticker using in-memory grouped data ---
         signals: list[dict] = []
+        skipped_cooldown = 0
+        skipped_earnings = 0
 
-        for tkr in all_tickers:
-            df = _load_ohlcv_for_ticker(db, tkr.id, lookback_start)
-            if df.empty or len(df) < 20:
+        for tid, group_df in all_ohlcv.groupby("ticker_id"):
+            tkr = ticker_map.get(tid)
+            if tkr is None:
                 continue
 
+            # Need at least 20 rows for indicator computation
+            if len(group_df) < 20:
+                continue
+
+            # Signal cooldown: skip if this ticker fired recently
+            if tid in cooldown_tickers:
+                skipped_cooldown += 1
+                continue
+
+            # Earnings blacklist: skip if earnings within hold window
+            if tkr.symbol in earnings_blacklist:
+                skipped_earnings += 1
+                continue
+
+            df = group_df[["date", "open", "high", "low", "close", "volume"]].copy()
             df = add_all_indicators(df)
             latest = df.iloc[-1]
 
@@ -146,7 +200,10 @@ def run_screener(screen_date: date | None = None) -> dict:
                 "atr_pct_at_trigger": round(float(latest["atr_pct"]), 1),
             })
 
-        logger.info("Screener found %d signals on %s", len(signals), screen_date)
+        logger.info(
+            "Screener found %d signals on %s (skipped: %d cooldown, %d earnings)",
+            len(signals), screen_date, skipped_cooldown, skipped_earnings,
+        )
 
         # --- Persist signals to Postgres ---
         _save_signals(db, signals)
@@ -201,19 +258,37 @@ def _save_signals(db: Session, signals: list[dict]) -> None:
 async def run_daily_pipeline(screen_date: date | None = None) -> dict:
     """
     End-to-end daily pipeline called by the cron job:
-      1. Run the screener
-      2. Fetch Finnhub news for each signal
-      3. Send Telegram alert
+      1. Fetch earnings calendar to build blacklist (P2)
+      2. Run the screener (with cooldown + earnings exclusion)
+      3. Fetch Finnhub news for each signal
+      4. Send Telegram alert
     Returns the screener result dict.
     """
     import asyncio
-    from app.news_fetcher import fetch_news
+    from app.news_fetcher import fetch_news, fetch_earnings_blacklist
     from app.notifier import send_telegram_alert
 
-    result = run_screener(screen_date)
+    if screen_date is None:
+        screen_date = date.today()
+
+    # Step 1: Build earnings blacklist from Finnhub calendar
+    # We need ALL active symbols to check, so load them first
+    db = SessionLocal()
+    try:
+        all_tickers = db.query(Ticker).filter(Ticker.is_active.is_(True)).all()
+        all_symbols = [t.symbol for t in all_tickers]
+    finally:
+        db.close()
+
+    earnings_blacklist = await fetch_earnings_blacklist(
+        all_symbols, from_date=screen_date, hold_days=7,
+    )
+
+    # Step 2: Run the screener with cooldown + earnings exclusion
+    result = run_screener(screen_date, earnings_blacklist=earnings_blacklist)
     signals = result["signals"]
 
-    # Fetch news for all signals concurrently
+    # Step 3: Fetch news for all signals concurrently
     news_map: dict[str, list[dict]] = {}
     if signals:
         tasks = [fetch_news(s["symbol"], limit=3) for s in signals]
@@ -221,7 +296,7 @@ async def run_daily_pipeline(screen_date: date | None = None) -> dict:
         for sig, articles in zip(signals, news_results):
             news_map[sig["symbol"]] = articles
 
-    # Send Telegram notification
+    # Step 4: Send Telegram notification
     await send_telegram_alert(result, news_map)
 
     return result

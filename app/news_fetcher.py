@@ -1,8 +1,8 @@
 """
-Finnhub news enrichment module.
+Finnhub news & earnings calendar module.
 
-Fetches the top N most recent company news headlines for a given ticker
-using the Finnhub /company-news endpoint.
+- Fetches the top N most recent company news headlines (/company-news)
+- Fetches upcoming earnings dates (/calendar/earnings) to avoid binary event risk
 """
 
 import logging
@@ -61,3 +61,60 @@ async def fetch_news(symbol: str, limit: int = 3) -> list[dict]:
         })
 
     return articles
+
+
+async def fetch_earnings_blacklist(
+    symbols: list[str],
+    from_date: date | None = None,
+    hold_days: int = 7,
+) -> set[str]:
+    """
+    Return the set of symbols that have an earnings report scheduled
+    within the next *hold_days* trading days.
+
+    Uses Finnhub's /calendar/earnings endpoint which accepts a date range
+    and returns all earnings in that window.
+
+    Symbols with upcoming earnings are excluded from the screener to
+    avoid binary event risk during our hold period.
+    """
+    if not symbols or not FINNHUB_API_KEY:
+        return set()
+
+    if from_date is None:
+        from_date = date.today()
+
+    # Look ahead ~10 calendar days to cover 7 trading days
+    to_date = from_date + timedelta(days=hold_days + 3)
+
+    url = (
+        f"{FINNHUB_BASE}/calendar/earnings"
+        f"?from={from_date.isoformat()}&to={to_date.isoformat()}"
+        f"&token={FINNHUB_API_KEY}"
+    )
+
+    try:
+        connector = aiohttp.TCPConnector(ssl=_ssl_ctx)
+        async with aiohttp.ClientSession(connector=connector) as session:
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    logger.warning("Finnhub earnings calendar fetch failed: HTTP %d", resp.status)
+                    return set()
+                data = await resp.json()
+    except Exception as e:
+        logger.warning("Finnhub earnings calendar error: %s", e)
+        return set()
+
+    # data = {"earningsCalendar": [{"symbol": "AAPL", "date": "2026-02-15", ...}, ...]}
+    earnings_symbols = set()
+    symbol_set = set(symbols)  # for O(1) lookup
+    for entry in data.get("earningsCalendar", []):
+        sym = entry.get("symbol", "")
+        if sym in symbol_set:
+            earnings_symbols.add(sym)
+
+    logger.info(
+        "Earnings blacklist: %d of %d screened symbols report within %d days",
+        len(earnings_symbols), len(symbols), hold_days,
+    )
+    return earnings_symbols

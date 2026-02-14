@@ -31,7 +31,9 @@ logger = logging.getLogger(__name__)
 BATCH_SIZE = 500
 HOLD_DAYS = 7
 STOP_LOSS = 0.03   # 3% hard stop-loss — STRICT REQUIREMENT
-FEES = 0.001        # 0.1% round-trip for slippage/commissions
+FEES = 0.001        # 0.1% round-trip commissions
+SLIPPAGE = 0.002    # 20 bps per side — realistic for small-cap spreads
+SIZE = 0.10          # 10% of equity per trade (fixed-fractional sizing)
 
 
 # ------------------------------------------------------------------
@@ -78,6 +80,7 @@ def _pivot_column(df: pd.DataFrame, column: str, id_to_symbol: dict[int, str]) -
 
 def _run_batch(
     price_df: pd.DataFrame,
+    open_df: pd.DataFrame,
     rvol_df: pd.DataFrame,
     atr_pct_df: pd.DataFrame,
 ) -> list[dict]:
@@ -89,9 +92,11 @@ def _run_batch(
     # Align all DataFrames to the same date index (drop leading NaN rows
     # from indicator rolling windows so shapes match for vectorbt broadcast)
     common_idx = price_df.dropna(how="all").index \
+        .intersection(open_df.dropna(how="all").index) \
         .intersection(rvol_df.dropna(how="all").index) \
         .intersection(atr_pct_df.dropna(how="all").index)
     price_df = price_df.loc[common_idx]
+    open_df = open_df.loc[common_idx]
     rvol_df = rvol_df.loc[common_idx]
     atr_pct_df = atr_pct_df.loc[common_idx]
 
@@ -99,20 +104,33 @@ def _run_batch(
         return []
 
     # 1. Entry signals: RVOL > 2.0 AND ATR% > 8.0
-    entries = (rvol_df > 2.0) & (atr_pct_df > 8.0)
+    raw_entries = (rvol_df > 2.0) & (atr_pct_df > 8.0)
 
-    # 2. Time-based exits: 7 trading days after entry
-    exits = entries.shift(HOLD_DAYS).fillna(False).infer_objects(copy=False)
+    # P0 FIX: Shift entries forward by 1 day to eliminate look-ahead bias.
+    # Signal fires on day T close; we can only execute on day T+1 open.
+    entries = raw_entries.shift(1)
+    entries = entries.fillna(False).astype(bool)
+
+    # 2. Time-based exits: 7 trading days after the *shifted* entry
+    exits = entries.shift(HOLD_DAYS)
+    exits = exits.fillna(False).astype(bool)
 
     # 3. Run the portfolio simulation with 3% hard stop-loss
+    #    - open=open_df: execute entries/exits at the open price (not close)
+    #    - slippage=SLIPPAGE: 20 bps per side for small-cap spread realism
+    #    - size=SIZE, size_type="percent": risk 10% of equity per trade
     portfolio = vbt.Portfolio.from_signals(
         close=price_df,
+        open=open_df,
         entries=entries,
         exits=exits,
         sl_stop=STOP_LOSS,
         freq="1D",
         fees=FEES,
+        slippage=SLIPPAGE,
         init_cash=10_000,
+        size=SIZE,
+        size_type="percent",
         accumulate=False,     # One position at a time per ticker
     )
 
@@ -187,7 +205,7 @@ def _run_batch(
 def _compute_wide_indicators(df: pd.DataFrame, id_to_symbol: dict) -> tuple:
     """
     Given a long-format DataFrame, compute per-ticker indicators and return
-    wide (pivoted) DataFrames: price_df, rvol_df, atr_pct_df.
+    wide (pivoted) DataFrames: price_df, open_df, rvol_df, atr_pct_df.
     """
     all_rvol = []
     all_atr_pct = []
@@ -207,10 +225,11 @@ def _compute_wide_indicators(df: pd.DataFrame, id_to_symbol: dict) -> tuple:
     df = df.merge(atr_long, on=["date", "ticker_id"], how="left")
 
     price_df = _pivot_column(df, "close", id_to_symbol)
+    open_df = _pivot_column(df, "open", id_to_symbol)
     rvol_df = _pivot_column(df, "rvol", id_to_symbol)
     atr_pct_df = _pivot_column(df, "atr_pct", id_to_symbol)
 
-    return price_df, rvol_df, atr_pct_df
+    return price_df, open_df, rvol_df, atr_pct_df
 
 
 # ------------------------------------------------------------------
@@ -256,18 +275,18 @@ def run_full_backtest(years_back: int = 2) -> list[dict]:
             logger.info("Batch %d: no data, skipping", batch_num)
             continue
 
-        price_df, rvol_df, atr_pct_df = _compute_wide_indicators(raw_df, id_to_symbol)
+        price_df, open_df, rvol_df, atr_pct_df = _compute_wide_indicators(raw_df, id_to_symbol)
 
         # Free the raw data before running the simulation
         del raw_df
         gc.collect()
 
-        batch_results = _run_batch(price_df, rvol_df, atr_pct_df)
+        batch_results = _run_batch(price_df, open_df, rvol_df, atr_pct_df)
         all_results.extend(batch_results)
         logger.info("Batch %d: got metrics for %d tickers", batch_num, len(batch_results))
 
         # Memory safety: clear batch DataFrames
-        del price_df, rvol_df, atr_pct_df
+        del price_df, open_df, rvol_df, atr_pct_df
         gc.collect()
 
     logger.info("Backtest complete. Results for %d tickers.", len(all_results))
@@ -296,8 +315,8 @@ def run_single_ticker_backtest(symbol: str, years_back: int = 2) -> dict | None:
         return None
 
     id_to_symbol = {tkr.id: tkr.symbol}
-    price_df, rvol_df, atr_pct_df = _compute_wide_indicators(raw_df, id_to_symbol)
+    price_df, open_df, rvol_df, atr_pct_df = _compute_wide_indicators(raw_df, id_to_symbol)
     del raw_df
 
-    results = _run_batch(price_df, rvol_df, atr_pct_df)
+    results = _run_batch(price_df, open_df, rvol_df, atr_pct_df)
     return results[0] if results else None
