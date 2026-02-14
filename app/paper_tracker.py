@@ -28,7 +28,7 @@ from app.indicators import compute_atr_pct
 logger = logging.getLogger(__name__)
 
 # ── Constants (match backtester) ──────────────────────────────────
-MOMENTUM_HOLD_DAYS = 7
+MOMENTUM_HOLD_DAYS = 10              # tuned from 7 → 10 (sweep rank #1)
 REVERSION_HOLD_DAYS = 5
 REVERSION_STOP = 0.05       # 5% hard stop-loss
 SLIPPAGE = 0.002             # 20 bps
@@ -41,6 +41,24 @@ TARGET_RISK = 0.01           # 1% risk per trade
 MIN_SIZE = 0.05              # 5% floor
 MAX_SIZE = 0.20              # 20% cap
 
+# Chandelier trailing stop ATR multiplier
+MOMENTUM_STOP_MULT = 3.5            # tuned from 2.0 → 3.5 (sweep rank #1)
+
+# Exit strategy: profit targets + hold extension
+MOMENTUM_PROFIT_TARGET = 0.10    # +10% → take profit
+REVERSION_PROFIT_TARGET = 0.05   # +5% → take profit
+EXTENDED_MOMENTUM_HOLD = 14      # high-quality: 14 days (was 10, scaled with new hold)
+EXTENDED_REVERSION_HOLD = 7      # high-quality: 7 days (was 5)
+QUALITY_EXTENSION_THRESHOLD = 70  # Q >= 70 to qualify for extension
+
+# Signal quality gate
+MOMENTUM_QUALITY_FLOOR = 60      # skip signals with Q < 60 (sweep rank #1)
+
+# Regime-aware sizing + filtering
+REGIME_MULTIPLIERS = {"Bullish": 1.0, "Mixed": 0.75, "Bearish": 0.50}
+QUALITY_SIZE_MULTIPLIERS = {70: 1.25, 40: 1.0, 0: 0.75}  # Q>=70 → 1.25x, Q>=40 → 1x, else 0.75x
+SKIP_BEARISH_REGIME = True           # skip momentum trades entirely in Bearish regime (sweep rank #1)
+
 
 # ── 1. Create Pending Trades ─────────────────────────────────────
 
@@ -48,12 +66,17 @@ def create_pending_trades(
     db: Session,
     signals: list[dict],
     strategy: str,
+    regime: str = "Unknown",
 ) -> int:
     """
     Create pending paper trades from screener signals.
 
     Deduplicates by (ticker_id, signal_date, strategy) using the
     unique constraint. Skips signals that already have a paper trade.
+
+    Args:
+        regime: Market regime string ("Bullish", "Mixed", "Bearish", "Unknown").
+            Used to scale position size down in adverse regimes.
 
     Returns the number of new trades created.
     """
@@ -63,6 +86,15 @@ def create_pending_trades(
         signal_date = sig.get("date")
         if not ticker_id or not signal_date:
             continue
+
+        # Quality floor: skip low-quality momentum signals
+        if strategy == "momentum":
+            q = sig.get("quality_score", 0) or 0
+            if q < MOMENTUM_QUALITY_FLOOR:
+                continue
+            # Regime gate: skip momentum trades in Bearish regime
+            if SKIP_BEARISH_REGIME and regime == "Bearish":
+                continue
 
         # Check for existing trade (dedup)
         existing = (
@@ -77,12 +109,26 @@ def create_pending_trades(
         if existing:
             continue
 
-        # Compute vol-scaled position size from ATR%
+        # Volatility-scaled base size
         atr_pct = sig.get("atr_pct_at_trigger", 10.0)
         if atr_pct and atr_pct > 0:
-            scaled_frac = min(max(TARGET_RISK / (atr_pct / 100.0), MIN_SIZE), MAX_SIZE)
+            scaled_frac = TARGET_RISK / (atr_pct / 100.0)
         else:
             scaled_frac = 0.10  # fallback
+
+        # Regime multiplier
+        regime_mult = REGIME_MULTIPLIERS.get(regime, 0.75)
+
+        # Quality multiplier
+        q = sig.get("quality_score", 0) or 0
+        if q >= 70:
+            quality_mult = 1.25
+        elif q >= 40:
+            quality_mult = 1.0
+        else:
+            quality_mult = 0.75
+
+        scaled_frac = min(max(scaled_frac * regime_mult * quality_mult, MIN_SIZE), MAX_SIZE)
         pos_size = round(ACCOUNT_SIZE * scaled_frac, 2)
 
         trade = PaperTrade(
@@ -216,9 +262,9 @@ def _compute_chandelier_stop(
     if np.isnan(atr_pct):
         return round(highest_high * 0.90, 4)
 
-    # Chandelier: trail distance = 2 * daily_atr_frac
+    # Chandelier: trail distance = MOMENTUM_STOP_MULT * daily_atr_frac
     # daily_atr_frac = ATR% / (sqrt(5) * 100)
-    trail_frac = 2.0 * atr_pct / (np.sqrt(5) * 100.0)
+    trail_frac = MOMENTUM_STOP_MULT * atr_pct / (np.sqrt(5) * 100.0)
     stop = highest_high * (1 - trail_frac)
     return round(stop, 4)
 
@@ -253,12 +299,14 @@ def _get_nth_trading_day(
 
 def check_open_trades(db: Session, check_date: date | None = None) -> int:
     """
-    Check open trades for stop hits and time exits.
+    Check open trades for stop hits, profit targets, and time exits.
 
     Priority order:
       1. Stop hit: today.low <= stop_level → exit at stop_level
-      2. Momentum trailing update: today.high > highest_high → recalc stop
-      3. Time exit: today >= planned_exit_date → exit at close * (1 - slippage)
+      2. Profit target: today.high >= entry * (1+target) → exit at target price
+      3. Momentum trailing update: today.high > highest_high → recalc stop
+      4. Time exit: today >= planned_exit_date → exit at close * (1 - slippage)
+         (with quality-based hold extension for Q >= 70 profitable trades)
 
     Returns the number of trades closed.
     """
@@ -297,7 +345,16 @@ def check_open_trades(db: Session, check_date: date | None = None) -> int:
             closed += 1
             continue
 
-        # 2. Momentum trailing stop update
+        # 2. Profit target check
+        if trade.entry_price:
+            target = MOMENTUM_PROFIT_TARGET if trade.strategy == "momentum" else REVERSION_PROFIT_TARGET
+            if today_data.high >= trade.entry_price * (1 + target):
+                exit_price = round(trade.entry_price * (1 + target), 4)
+                _close_trade(trade, exit_price, check_date, "profit_target")
+                closed += 1
+                continue
+
+        # 3. Momentum trailing stop update
         if (
             trade.strategy == "momentum"
             and today_data.high > (trade.highest_high_since_entry or 0)
@@ -308,8 +365,20 @@ def check_open_trades(db: Session, check_date: date | None = None) -> int:
                 today_data.high,
             )
 
-        # 3. Time exit check
+        # 4. Time exit — with quality-based hold extension
         if trade.planned_exit_date and check_date >= trade.planned_exit_date:
+            # High-quality + profitable → extend hold period once
+            if (
+                trade.exit_reason != "extended"  # not already extended
+                and (trade.quality_score or 0) >= QUALITY_EXTENSION_THRESHOLD
+                and trade.entry_price
+                and today_data.close > trade.entry_price
+            ):
+                ext_days = EXTENDED_MOMENTUM_HOLD if trade.strategy == "momentum" else EXTENDED_REVERSION_HOLD
+                trade.planned_exit_date = _get_nth_trading_day(db, trade.ticker_id, trade.entry_date, ext_days)
+                trade.exit_reason = "extended"  # flag to prevent double extension
+                continue
+
             exit_price = round(today_data.close * (1 - SLIPPAGE), 4)
             _close_trade(trade, exit_price, check_date, "time_exit")
             closed += 1
@@ -499,7 +568,64 @@ def get_paper_trades(db: Session, status: str | None = None) -> list[dict]:
     return result
 
 
-# ── 6. Backfill Paper Trades ────────────────────────────────────
+# ── 6. Regime Map for Backfill ─────────────────────────────────
+
+def _build_regime_map(db: Session, trading_dates: list[date]) -> dict[date, str]:
+    """
+    Pre-compute market regime (Bullish/Mixed/Bearish) for each trading date.
+
+    Loads SPY and QQQ close prices once, then computes SMA-20 regime
+    for every date in trading_dates.
+    """
+    import pandas as pd
+    from app.models import Ticker, DailyMarketData
+
+    regime_map: dict[date, str] = {}
+    if not trading_dates:
+        return regime_map
+
+    # Load SPY and QQQ tickers
+    spy_tkr = db.query(Ticker).filter(Ticker.symbol == "SPY").first()
+    qqq_tkr = db.query(Ticker).filter(Ticker.symbol == "QQQ").first()
+    if not spy_tkr or not qqq_tkr:
+        return regime_map
+
+    # Load close prices with buffer for SMA-20 computation
+    buffer_start = min(trading_dates) - timedelta(days=45)
+    for tkr_obj, label in [(spy_tkr, "spy"), (qqq_tkr, "qqq")]:
+        rows = (
+            db.query(DailyMarketData.date, DailyMarketData.close)
+            .filter(
+                DailyMarketData.ticker_id == tkr_obj.id,
+                DailyMarketData.date >= buffer_start,
+            )
+            .order_by(DailyMarketData.date.asc())
+            .all()
+        )
+        df = pd.DataFrame(rows, columns=["date", "close"])
+        df["sma_20"] = df["close"].rolling(20).mean()
+        df["above_sma20"] = df["close"] > df["sma_20"]
+        if label == "spy":
+            spy_lookup = dict(zip(df["date"], df["above_sma20"]))
+        else:
+            qqq_lookup = dict(zip(df["date"], df["above_sma20"]))
+
+    for d in trading_dates:
+        spy_above = spy_lookup.get(d)
+        qqq_above = qqq_lookup.get(d)
+        if spy_above is True and qqq_above is True:
+            regime_map[d] = "Bullish"
+        elif spy_above is False and qqq_above is False:
+            regime_map[d] = "Bearish"
+        elif spy_above is not None and qqq_above is not None:
+            regime_map[d] = "Mixed"
+        else:
+            regime_map[d] = "Unknown"
+
+    return regime_map
+
+
+# ── 7. Backfill Paper Trades ────────────────────────────────────
 
 def backfill_paper_trades(db: Session) -> dict:
     """
@@ -569,7 +695,10 @@ def backfill_paper_trades(db: Session) -> dict:
             "trading_days_processed": 0,
         }
 
-    # 5. Iterate each trading date IN ORDER: fill → check → create
+    # 5. Pre-compute regime for all trading dates
+    regime_map = _build_regime_map(db, trading_dates)
+
+    # 6. Iterate each trading date IN ORDER: fill → check → create
     total_created = 0
     total_filled = 0
     total_closed = 0
@@ -591,10 +720,11 @@ def backfill_paper_trades(db: Session) -> dict:
         # Create new pending trades if signals exist for this date
         if current_date in signal_dates:
             signals = signal_dates[current_date]
+            regime = regime_map.get(current_date, "Unknown")
             if signals["momentum"]:
-                total_created += create_pending_trades(db, signals["momentum"], "momentum")
+                total_created += create_pending_trades(db, signals["momentum"], "momentum", regime=regime)
             if signals["reversion"]:
-                total_created += create_pending_trades(db, signals["reversion"], "reversion")
+                total_created += create_pending_trades(db, signals["reversion"], "reversion", regime=regime)
 
     # Final pass: fill and close any remaining trades
     total_filled += fill_pending_trades(db)
@@ -618,7 +748,7 @@ def backfill_paper_trades(db: Session) -> dict:
     }
 
 
-# ── 7. Get Equity Curve ────────────────────────────────────────
+# ── 8. Get Equity Curve ────────────────────────────────────────
 
 def get_equity_curve(db: Session) -> list[dict]:
     """

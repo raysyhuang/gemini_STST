@@ -47,9 +47,9 @@ MIN_SIZE = 0.05      # 5% floor
 MAX_SIZE = 0.20      # 20% cap
 
 # Momentum strategy
-MOMENTUM_HOLD_DAYS = 7
-# Trailing stop: sl_stop = 2 * ATR(14) / close with sl_trail=True (Chandelier exit)
-# For ATR%=10% stocks, trail distance ≈ 8.9% from highest high since entry
+MOMENTUM_HOLD_DAYS = 10              # tuned from 7 → 10 (parameter sweep)
+MOMENTUM_STOP_MULT = 3.5            # tuned from 2.0 → 3.5 (parameter sweep)
+# Trailing stop: sl_stop = MOMENTUM_STOP_MULT * ATR(14) / close with sl_trail=True (Chandelier exit)
 
 # Mean Reversion strategy
 REVERSION_HOLD_DAYS = 5
@@ -173,10 +173,10 @@ def _run_batch(
         entries = raw_entries.shift(1).fillna(False).astype(bool)
         exits = entries.shift(MOMENTUM_HOLD_DAYS).fillna(False).astype(bool)
 
-        # Chandelier trailing stop: 2 * daily ATR as fraction of price
+        # Chandelier trailing stop: MOMENTUM_STOP_MULT * daily ATR as fraction of price
         # ATR% = (ATR/close) * sqrt(5) * 100  →  daily ATR/close = ATR%/(sqrt(5)*100)
         # sl_trail=True makes sl_stop trail from highest high since entry
-        chandelier_df = 2.0 * atr_pct_df / (np.sqrt(5) * 100.0)
+        chandelier_df = MOMENTUM_STOP_MULT * atr_pct_df / (np.sqrt(5) * 100.0)
 
         portfolio = vbt.Portfolio.from_signals(
             close=price_df,
