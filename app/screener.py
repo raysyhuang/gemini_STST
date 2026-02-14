@@ -225,3 +225,40 @@ async def run_daily_pipeline(screen_date: date | None = None) -> dict:
     await send_telegram_alert(result, news_map)
 
     return result
+
+
+# ------------------------------------------------------------------
+# CLI entry point: python -m app.screener
+# ------------------------------------------------------------------
+
+if __name__ == "__main__":
+    import asyncio
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
+    )
+
+    async def _main():
+        # 1. Run data pipeline first (fetch latest OHLCV from Polygon)
+        from app.data_fetcher import run_full_data_pipeline
+
+        logger.info("=== Starting data fetch pipeline ===")
+        await run_full_data_pipeline()
+
+        # 2. Run screener + news + Telegram
+        logger.info("=== Starting daily screener pipeline ===")
+        result = await run_daily_pipeline()
+
+        regime = result["regime"]["regime"]
+        n = len(result["signals"])
+        logger.info("=== Done — Regime: %s | Signals: %d ===", regime, n)
+
+        for s in result["signals"]:
+            logger.info(
+                "  %s  $%.2f  RVOL=%.2f  ATR%%=%.1f",
+                s["symbol"], s["trigger_price"],
+                s["rvol_at_trigger"], s["atr_pct_at_trigger"],
+            )
+
+    asyncio.run(_main())
