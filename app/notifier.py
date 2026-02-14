@@ -13,6 +13,7 @@ import aiohttp
 import certifi
 
 from app.config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+from app.paper_tracker import MOMENTUM_QUALITY_FLOOR, SKIP_BEARISH_REGIME
 
 logger = logging.getLogger(__name__)
 
@@ -65,13 +66,22 @@ def _build_message(
         "",
     ]
 
+    skip_mom = False
     if regime_str == "Bearish":
         lines.append(_escape_md("⚠️ Bearish Regime — exercise caution"))
+        if SKIP_BEARISH_REGIME:
+            lines.append(_escape_md("⛔ Momentum trades SKIPPED (bearish regime filter)"))
+            skip_mom = True
         lines.append("")
 
     # --- Momentum Section ---
+    tradeable = [s for s in signals if (s.get("quality_score") or 0) >= MOMENTUM_QUALITY_FLOOR]
     n_mom = len(signals)
-    lines.append(f"*— MOMENTUM BREAKOUTS \\({n_mom}\\) —*")
+    n_trade = len(tradeable) if not skip_mom else 0
+    if n_trade < n_mom and not skip_mom:
+        lines.append(f"*— MOMENTUM BREAKOUTS \\({n_mom} signals, {n_trade} tradeable Q\\>\\={MOMENTUM_QUALITY_FLOOR}\\) —*")
+    else:
+        lines.append(f"*— MOMENTUM BREAKOUTS \\({n_mom}\\) —*")
     lines.append("")
 
     if not signals:
@@ -87,8 +97,11 @@ def _build_message(
             confluence = sig.get("confluence", False)
 
             sym_esc = _escape_md(sym)
+            # Mark signals that won't be traded
+            will_trade = (quality or 0) >= MOMENTUM_QUALITY_FLOOR and not skip_mom
             badge = "\u2B50 " if confluence else ""
-            lines.append(f"{badge}*{sym_esc}* — ${_escape_md(str(price))}")
+            dim = "" if will_trade else "~"
+            lines.append(f"{badge}{dim}*{sym_esc}* — ${_escape_md(str(price))}{dim}")
 
             rsi_14 = sig.get("rsi_14")
             pct_52w = sig.get("pct_from_52w_high")

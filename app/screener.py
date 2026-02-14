@@ -514,8 +514,10 @@ async def run_daily_pipeline(screen_date: date | None = None) -> dict:
     finally:
         db.close()
 
+    from app.paper_tracker import MOMENTUM_HOLD_DAYS
+
     earnings_blacklist = await fetch_earnings_blacklist(
-        all_symbols, from_date=screen_date, hold_days=7,
+        all_symbols, from_date=screen_date, hold_days=MOMENTUM_HOLD_DAYS,
     )
 
     # Step 2: Run the momentum screener with cooldown + earnings exclusion
