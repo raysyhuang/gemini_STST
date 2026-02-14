@@ -31,8 +31,8 @@ from app.schemas import (
     SignalResponse,
 )
 from app.news_fetcher import fetch_news
-from app.backtester import run_single_ticker_backtest
-from app.indicators import check_market_regime
+# NOTE: backtester import is LAZY to avoid vectorbt/plotly loading at boot
+# (prevents Heroku H20 boot timeout). Imported inside the endpoint handler.
 
 logger = logging.getLogger(__name__)
 
@@ -148,6 +148,9 @@ async def backtest_ticker(ticker: str):
             raise HTTPException(status_code=404, detail=f"Ticker '{symbol}' not found")
     finally:
         db.close()
+
+    # Lazy import to avoid vectorbt/plotly loading at boot time
+    from app.backtester import run_single_ticker_backtest
 
     # Run the backtest (CPU-bound, offload to thread)
     result = await asyncio.to_thread(run_single_ticker_backtest, symbol)
