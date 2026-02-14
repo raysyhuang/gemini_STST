@@ -241,10 +241,12 @@ if __name__ == "__main__":
 
     async def _main():
         # 1. Run data pipeline first (fetch latest OHLCV from Polygon)
+        #    Use years_back=0 (90 calendar days) for the daily screener run
+        #    to keep memory usage within Heroku's 512 MB limit.
         from app.data_fetcher import run_full_data_pipeline
 
-        logger.info("=== Starting data fetch pipeline ===")
-        await run_full_data_pipeline()
+        logger.info("=== Starting data fetch pipeline (90 days) ===")
+        await run_full_data_pipeline(years_back=0)
 
         # 2. Run screener + news + Telegram
         logger.info("=== Starting daily screener pipeline ===")

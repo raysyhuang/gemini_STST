@@ -30,8 +30,8 @@ from app.models import Ticker, DailyMarketData
 logger = logging.getLogger(__name__)
 
 POLYGON_BASE = "https://api.polygon.io"
-MAX_CONCURRENCY = 50  # Paid tier allows aggressive concurrency
-BATCH_SIZE = 500      # Tickers per memory-safe batch
+MAX_CONCURRENCY = 20  # Keep memory pressure low on Heroku 512 MB dynos
+BATCH_SIZE = 100      # Tickers per memory-safe batch
 
 # Resolve macOS Python SSL cert issues
 _ssl_ctx = ssl.create_default_context(cafile=certifi.where())
@@ -202,18 +202,22 @@ def bulk_upsert_ohlcv(db: Session, rows: list[dict], ticker_map: dict[str, int])
     if not values:
         return 0
 
-    stmt = pg_insert(DailyMarketData).values(values)
-    stmt = stmt.on_conflict_do_update(
-        constraint="uq_ticker_date",
-        set_={
-            "open": stmt.excluded.open,
-            "high": stmt.excluded.high,
-            "low": stmt.excluded.low,
-            "close": stmt.excluded.close,
-            "volume": stmt.excluded.volume,
-        },
-    )
-    db.execute(stmt)
+    # Chunk the upsert to avoid building a single massive INSERT statement
+    UPSERT_CHUNK = 1000
+    for j in range(0, len(values), UPSERT_CHUNK):
+        chunk = values[j : j + UPSERT_CHUNK]
+        stmt = pg_insert(DailyMarketData).values(chunk)
+        stmt = stmt.on_conflict_do_update(
+            constraint="uq_ticker_date",
+            set_={
+                "open": stmt.excluded.open,
+                "high": stmt.excluded.high,
+                "low": stmt.excluded.low,
+                "close": stmt.excluded.close,
+                "volume": stmt.excluded.volume,
+            },
+        )
+        db.execute(stmt)
     db.commit()
     return len(values)
 
@@ -232,7 +236,8 @@ async def run_full_data_pipeline(years_back: int = 2) -> None:
     import gc
 
     to_date = date.today().isoformat()
-    from_date = (date.today() - timedelta(days=365 * years_back)).isoformat()
+    lookback_days = 365 * years_back if years_back > 0 else 90
+    from_date = (date.today() - timedelta(days=lookback_days)).isoformat()
 
     # --- Step 1: Tickers ---
     async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=_ssl_ctx)) as session:
