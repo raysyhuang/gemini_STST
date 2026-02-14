@@ -102,6 +102,25 @@ function switchView(view) {
     }
 }
 
+// ---- Options Flow helper ----
+
+function formatFlow(stock) {
+    const s = stock.options_sentiment;
+    const pcr = stock.put_call_ratio;
+    if (!s || s === 'Neutral') {
+        return pcr != null ? `<span class="flow-neutral">${pcr.toFixed(2)}</span>` : '--';
+    }
+    if (s === 'Bullish') {
+        const label = pcr != null ? pcr.toFixed(2) : '';
+        return `<span class="flow-bullish" title="P/C: ${label}">\u{1F402} ${label}</span>`;
+    }
+    if (s === 'Bearish') {
+        const label = pcr != null ? pcr.toFixed(2) : '';
+        return `<span class="flow-bearish" title="P/C: ${label}">\u{1F43B} ${label}</span>`;
+    }
+    return '--';
+}
+
 // ---- Momentum Screener ----
 
 async function fetchScreenerData() {
@@ -149,6 +168,7 @@ function renderMomentumSignals() {
             <td>${stock.ticker}</td>
             <td>${stock.rvol_at_trigger.toFixed(2)}</td>
             <td>${stock.atr_pct_at_trigger.toFixed(1)}%</td>
+            <td>${formatFlow(stock)}</td>
             <td>$${stock.trigger_price.toFixed(2)}</td>
         `;
         tr.addEventListener('click', () => onMomentumClick(idx));
@@ -206,6 +226,7 @@ function renderReversionSignals() {
             <td>${stock.ticker}</td>
             <td>${stock.rsi2.toFixed(1)}</td>
             <td>${stock.drawdown_3d_pct.toFixed(1)}%</td>
+            <td>${formatFlow(stock)}</td>
             <td>$${stock.trigger_price.toFixed(2)}</td>
         `;
         tr.addEventListener('click', () => onReversionClick(idx));

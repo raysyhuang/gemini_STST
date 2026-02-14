@@ -397,3 +397,8 @@ html, body {
         max-height: 40vh;
     }
 }
+
+/* Options Flow badges */
+.flow-bullish { color: var(--green); font-weight: 600; white-space: nowrap; }
+.flow-bearish { color: var(--red);   font-weight: 600; white-space: nowrap; }
+.flow-neutral { color: var(--text-secondary); white-space: nowrap; }

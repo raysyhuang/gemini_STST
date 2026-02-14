@@ -233,6 +233,8 @@ def _save_signals(db: Session, signals: list[dict]) -> None:
             "trigger_price": s["trigger_price"],
             "rvol_at_trigger": s["rvol_at_trigger"],
             "atr_pct_at_trigger": s["atr_pct_at_trigger"],
+            "options_sentiment": s.get("options_sentiment"),
+            "put_call_ratio": s.get("put_call_ratio"),
         }
         for s in signals
     ]
@@ -244,6 +246,8 @@ def _save_signals(db: Session, signals: list[dict]) -> None:
             "trigger_price": stmt.excluded.trigger_price,
             "rvol_at_trigger": stmt.excluded.rvol_at_trigger,
             "atr_pct_at_trigger": stmt.excluded.atr_pct_at_trigger,
+            "options_sentiment": stmt.excluded.options_sentiment,
+            "put_call_ratio": stmt.excluded.put_call_ratio,
         },
     )
     db.execute(stmt)
@@ -292,7 +296,41 @@ async def run_daily_pipeline(screen_date: date | None = None) -> dict:
     from app.mean_reversion import run_reversion_screener
     reversion_result = run_reversion_screener(screen_date)
 
-    # Step 3: Fetch news for all momentum signals concurrently
+    # Step 3: Fetch options sentiment for ALL signal tickers (momentum + reversion)
+    from app.options_flow import fetch_options_sentiment_batch
+
+    rev_signals = reversion_result.get("signals", [])
+    all_signal_symbols = list({s["symbol"] for s in signals} | {s["symbol"] for s in rev_signals})
+    options_map = await fetch_options_sentiment_batch(all_signal_symbols)
+
+    # Attach options data to momentum signals
+    for sig in signals:
+        flow = options_map.get(sig["symbol"], {})
+        sig["options_sentiment"] = flow.get("sentiment")
+        sig["put_call_ratio"] = flow.get("put_call_ratio")
+
+    # Attach options data to reversion signals
+    for sig in rev_signals:
+        flow = options_map.get(sig["symbol"], {})
+        sig["options_sentiment"] = flow.get("sentiment")
+        sig["put_call_ratio"] = flow.get("put_call_ratio")
+
+    # Re-persist momentum signals with options data
+    db = SessionLocal()
+    try:
+        _save_signals(db, signals)
+    finally:
+        db.close()
+
+    # Re-persist reversion signals with options data
+    from app.mean_reversion import _save_reversion_signals
+    db = SessionLocal()
+    try:
+        _save_reversion_signals(db, rev_signals)
+    finally:
+        db.close()
+
+    # Step 4: Fetch news for all momentum signals concurrently
     news_map: dict[str, list[dict]] = {}
     if signals:
         tasks = [fetch_news(s["symbol"], limit=3) for s in signals]
@@ -300,7 +338,7 @@ async def run_daily_pipeline(screen_date: date | None = None) -> dict:
         for sig, articles in zip(signals, news_results):
             news_map[sig["symbol"]] = articles
 
-    # Step 4: Send unified Telegram notification (momentum + reversion)
+    # Step 5: Send unified Telegram notification (momentum + reversion)
     await send_telegram_alert(result, news_map, reversion_result=reversion_result)
 
     return result

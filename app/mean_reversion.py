@@ -75,6 +75,8 @@ def _save_reversion_signals(db: Session, signals: list[dict]) -> None:
             "rsi2_at_trigger": s["rsi2"],
             "drawdown_3d_pct": s["drawdown_3d_pct"],
             "sma_distance_pct": s["sma_distance_pct"],
+            "options_sentiment": s.get("options_sentiment"),
+            "put_call_ratio": s.get("put_call_ratio"),
         }
         for s in signals
     ]
@@ -87,6 +89,8 @@ def _save_reversion_signals(db: Session, signals: list[dict]) -> None:
             "rsi2_at_trigger": stmt.excluded.rsi2_at_trigger,
             "drawdown_3d_pct": stmt.excluded.drawdown_3d_pct,
             "sma_distance_pct": stmt.excluded.sma_distance_pct,
+            "options_sentiment": stmt.excluded.options_sentiment,
+            "put_call_ratio": stmt.excluded.put_call_ratio,
         },
     )
     db.execute(stmt)

@@ -122,6 +122,8 @@ async def screener_today():
                 "trigger_price": signal.trigger_price,
                 "rvol_at_trigger": signal.rvol_at_trigger,
                 "atr_pct_at_trigger": signal.atr_pct_at_trigger,
+                "options_sentiment": signal.options_sentiment,
+                "put_call_ratio": signal.put_call_ratio,
                 "news": [],  # populated below
             })
 
@@ -165,6 +167,8 @@ async def reversion_today():
             rsi2=s["rsi2"],
             drawdown_3d_pct=s["drawdown_3d_pct"],
             sma_distance_pct=s["sma_distance_pct"],
+            options_sentiment=s.get("options_sentiment"),
+            put_call_ratio=s.get("put_call_ratio"),
         ) for s in result["signals"]],
     )
 

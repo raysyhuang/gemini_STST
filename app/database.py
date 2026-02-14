@@ -38,6 +38,27 @@ def get_db():
 
 
 def init_db():
-    """Create all tables. Call once at startup."""
+    """Create all tables and run safe column migrations. Call once at startup."""
     import app.models  # noqa: F401 – ensure models are registered
-    Base.metadata.create_all(bind=_get_engine())
+    engine = _get_engine()
+    Base.metadata.create_all(bind=engine)
+
+    # Safe column migrations — ADD COLUMN IF NOT EXISTS is idempotent
+    _migrate_new_columns(engine)
+
+
+def _migrate_new_columns(engine):
+    """Add columns introduced after initial table creation."""
+    from sqlalchemy import text
+
+    migrations = [
+        # Phase 5 Sprint 2: Options flow columns
+        "ALTER TABLE screener_signals ADD COLUMN IF NOT EXISTS options_sentiment VARCHAR(10)",
+        "ALTER TABLE screener_signals ADD COLUMN IF NOT EXISTS put_call_ratio FLOAT",
+        "ALTER TABLE reversion_signals ADD COLUMN IF NOT EXISTS options_sentiment VARCHAR(10)",
+        "ALTER TABLE reversion_signals ADD COLUMN IF NOT EXISTS put_call_ratio FLOAT",
+    ]
+    with engine.connect() as conn:
+        for sql in migrations:
+            conn.execute(text(sql))
+        conn.commit()

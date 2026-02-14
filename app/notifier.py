@@ -27,6 +27,19 @@ def _escape_md(text: str) -> str:
     return text
 
 
+def _format_flow(sig: dict) -> str:
+    """Format options flow as escaped MarkdownV2 string."""
+    sentiment = sig.get("options_sentiment")
+    pcr = sig.get("put_call_ratio")
+    if not sentiment or sentiment == "Neutral":
+        if pcr is not None:
+            return _escape_md(f"Flow: Neutral (P/C: {pcr})")
+        return _escape_md("Flow: --")
+    icon = "\U0001f402" if sentiment == "Bullish" else "\U0001f43b"
+    pcr_str = f" \\(P/C: {_escape_md(str(pcr))}\\)" if pcr is not None else ""
+    return f"Flow: {_escape_md(icon)} {_escape_md(sentiment)}{pcr_str}"
+
+
 def _build_message(
     screener_result: dict,
     news_map: dict[str, list[dict]],
@@ -73,7 +86,9 @@ def _build_message(
 
             sym_esc = _escape_md(sym)
             lines.append(f"*{sym_esc}* — ${_escape_md(str(price))}")
-            lines.append(f"  RVOL: {_escape_md(str(rvol))} \\| ATR: {_escape_md(str(atr))}%")
+
+            flow_str = _format_flow(sig)
+            lines.append(f"  RVOL: {_escape_md(str(rvol))} \\| ATR: {_escape_md(str(atr))}% \\| {flow_str}")
 
             articles = news_map.get(sym, [])
             for article in articles[:2]:
@@ -96,8 +111,9 @@ def _build_message(
             price_esc = _escape_md(str(sig["trigger_price"]))
             rsi_esc = _escape_md(str(sig["rsi2"]))
             dd_esc = _escape_md(str(sig["drawdown_3d_pct"]))
+            flow_str = _format_flow(sig)
             lines.append(f"*{sym_esc}* — ${price_esc}")
-            lines.append(f"  RSI\\(2\\): {rsi_esc} \\| 3d Drop: {dd_esc}%")
+            lines.append(f"  RSI\\(2\\): {rsi_esc} \\| 3d Drop: {dd_esc}% \\| {flow_str}")
             lines.append("")
 
     return "\n".join(lines)

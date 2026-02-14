@@ -59,6 +59,10 @@ class ScreenerSignal(Base):
     rvol_at_trigger = Column(Float, nullable=False)
     atr_pct_at_trigger = Column(Float, nullable=False)
 
+    # Options flow overlay (Phase 5 Sprint 2)
+    options_sentiment = Column(String(10))   # Bullish / Bearish / Neutral
+    put_call_ratio = Column(Float)
+
     ticker = relationship("Ticker", back_populates="signals")
 
     __table_args__ = (
@@ -77,6 +81,10 @@ class ReversionSignal(Base):
     rsi2_at_trigger = Column(Float, nullable=False)
     drawdown_3d_pct = Column(Float, nullable=False)
     sma_distance_pct = Column(Float, nullable=False)
+
+    # Options flow overlay (Phase 5 Sprint 2)
+    options_sentiment = Column(String(10))   # Bullish / Bearish / Neutral
+    put_call_ratio = Column(Float)
 
     ticker = relationship("Ticker", back_populates="reversion_signals")
 

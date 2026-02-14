@@ -20,6 +20,8 @@ class SignalResponse(BaseModel):
     trigger_price: float
     rvol_at_trigger: float
     atr_pct_at_trigger: float
+    options_sentiment: str | None = None
+    put_call_ratio: float | None = None
     news: list[NewsArticle] = []
 
     model_config = {"from_attributes": True}
@@ -45,6 +47,8 @@ class ReversionSignalResponse(BaseModel):
     rsi2: float
     drawdown_3d_pct: float
     sma_distance_pct: float
+    options_sentiment: str | None = None
+    put_call_ratio: float | None = None
 
     model_config = {"from_attributes": True}
 
