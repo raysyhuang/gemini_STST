@@ -180,6 +180,19 @@ def run_reversion_screener(screen_date: date | None = None) -> dict:
     if all_ohlcv.empty:
         return {"date": screen_date, "signals": []}
 
+    # --- Filter funnel counters ---
+    funnel = {
+        "total_tickers": len(ticker_ids),
+        "insufficient_data": 0,
+        "stale_data": 0,
+        "price": 0,
+        "adv": 0,
+        "rsi2": 0,
+        "drawdown_3d": 0,
+        "sma_200": 0,
+        "passed": 0,
+    }
+
     # Screen each ticker using in-memory grouped data
     signals: list[dict] = []
 
@@ -190,6 +203,7 @@ def run_reversion_screener(screen_date: date | None = None) -> dict:
 
         # Need at least 200 rows for SMA-200
         if len(group_df) < 200:
+            funnel["insufficient_data"] += 1
             continue
 
         df = group_df[["date", "open", "high", "low", "close", "volume"]].copy()
@@ -209,28 +223,34 @@ def run_reversion_screener(screen_date: date | None = None) -> dict:
 
         # Make sure the latest row is near the screen_date
         if (screen_date - latest["date"]).days > 5:
+            funnel["stale_data"] += 1
             continue
 
         # --- Apply filter chain ---
 
         # 1. Price > $5
         if latest["close"] <= MIN_PRICE:
+            funnel["price"] += 1
             continue
 
         # 2. ADV > 1.5M
         if pd.isna(latest["adv_20"]) or latest["adv_20"] <= MIN_ADV:
+            funnel["adv"] += 1
             continue
 
         # 3. RSI(2) < 10
         if pd.isna(latest["rsi2"]) or latest["rsi2"] >= MAX_RSI2:
+            funnel["rsi2"] += 1
             continue
 
         # 4. 3-day drawdown >= 15%
         if pd.isna(latest["drawdown_3d"]) or latest["drawdown_3d"] > -MIN_DRAWDOWN_3D:
+            funnel["drawdown_3d"] += 1
             continue
 
         # 5. Close > SMA-200 (long-term uptrend intact)
         if pd.isna(latest["sma_200"]) or latest["close"] <= latest["sma_200"]:
+            funnel["sma_200"] += 1
             continue
 
         # SMA distance: how far below the 20-day SMA (rubber-band stretch)
@@ -257,7 +277,14 @@ def run_reversion_screener(screen_date: date | None = None) -> dict:
             "confluence": False,  # set by screener._detect_confluence
         })
 
-    logger.info("Reversion screener found %d signals on %s", len(signals), screen_date)
+    funnel["passed"] = len(signals)
+    logger.info(
+        "Reversion funnel: %d tickers → %d insufficient_data, %d stale_data, "
+        "%d price, %d adv, %d rsi2, %d drawdown_3d, %d sma_200 → %d passed",
+        funnel["total_tickers"], funnel["insufficient_data"], funnel["stale_data"],
+        funnel["price"], funnel["adv"], funnel["rsi2"],
+        funnel["drawdown_3d"], funnel["sma_200"], funnel["passed"],
+    )
 
     # Sort by quality score descending (strongest first)
     signals.sort(key=lambda s: s["quality_score"], reverse=True)
@@ -273,4 +300,5 @@ def run_reversion_screener(screen_date: date | None = None) -> dict:
     return {
         "date": screen_date,
         "signals": signals,
+        "funnel": funnel,
     }

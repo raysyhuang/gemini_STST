@@ -44,6 +44,36 @@ MAX_RETURN_5D = 15.0  # percent — exclude stocks already up >15% in 5 days
 # Confluence detection lookback
 CONFLUENCE_LOOKBACK_DAYS = 14
 
+
+def _apply_momentum_filters(latest: pd.Series, version: str = "v2") -> bool:
+    """Apply momentum filter chain. Returns True if signal passes.
+
+    version="v1": original 6 filters (price, adv, atr%, rvol, sma-20, green candle)
+    version="v2": full 9 filters (+ RSI(14), SMA-50, 5-day return exclusion)
+    """
+    if latest["close"] <= MIN_PRICE:
+        return False
+    if pd.isna(latest["adv_20"]) or latest["adv_20"] <= MIN_ADV:
+        return False
+    if pd.isna(latest["atr_pct"]) or latest["atr_pct"] <= MIN_ATR_PCT:
+        return False
+    if pd.isna(latest["rvol"]) or latest["rvol"] <= MIN_RVOL:
+        return False
+    if pd.isna(latest["sma_20"]) or latest["close"] <= latest["sma_20"]:
+        return False
+    if latest["close"] <= latest["open"]:
+        return False
+
+    if version == "v2":
+        if pd.isna(latest.get("rsi_14")) or latest["rsi_14"] < MIN_RSI_14 or latest["rsi_14"] > MAX_RSI_14:
+            return False
+        if pd.isna(latest.get("sma_50")) or latest["close"] <= latest["sma_50"]:
+            return False
+        if not pd.isna(latest.get("return_5d")) and latest["return_5d"] >= MAX_RETURN_5D:
+            return False
+
+    return True
+
 # Need ~252 trading days for 52-week high; 400 calendar days covers that
 LOOKBACK_CALENDAR_DAYS = 400
 
@@ -151,10 +181,27 @@ def run_screener(
         logger.info("Cooldown: %d tickers signaled in last %d days",
                      len(cooldown_tickers), COOLDOWN_CALENDAR_DAYS)
 
+        # --- Filter funnel counters ---
+        funnel = {
+            "total_tickers": len(ticker_ids),
+            "insufficient_data": 0,
+            "cooldown": 0,
+            "earnings": 0,
+            "stale_data": 0,
+            "price": 0,
+            "adv": 0,
+            "atr_pct": 0,
+            "rvol": 0,
+            "sma_20": 0,
+            "green_candle": 0,
+            "rsi_14": 0,
+            "sma_50": 0,
+            "return_5d": 0,
+            "passed": 0,
+        }
+
         # --- Screen each ticker using in-memory grouped data ---
         signals: list[dict] = []
-        skipped_cooldown = 0
-        skipped_earnings = 0
 
         for tid, group_df in all_ohlcv.groupby("ticker_id"):
             tkr = ticker_map.get(tid)
@@ -163,16 +210,17 @@ def run_screener(
 
             # Need at least 20 rows for indicator computation
             if len(group_df) < 20:
+                funnel["insufficient_data"] += 1
                 continue
 
             # Signal cooldown: skip if this ticker fired recently
             if tid in cooldown_tickers:
-                skipped_cooldown += 1
+                funnel["cooldown"] += 1
                 continue
 
             # Earnings blacklist: skip if earnings within hold window
             if tkr.symbol in earnings_blacklist:
-                skipped_earnings += 1
+                funnel["earnings"] += 1
                 continue
 
             df = group_df[["date", "open", "high", "low", "close", "volume"]].copy()
@@ -182,36 +230,46 @@ def run_screener(
             # Make sure the latest row is actually on or near the screen_date
             # (within a few days to handle weekends / holidays)
             if (screen_date - latest["date"]).days > 5:
+                funnel["stale_data"] += 1
                 continue
 
             # --- Apply filter chain ---
             if latest["close"] <= MIN_PRICE:
+                funnel["price"] += 1
                 continue
             if pd.isna(latest["adv_20"]) or latest["adv_20"] <= MIN_ADV:
+                funnel["adv"] += 1
                 continue
             if pd.isna(latest["atr_pct"]) or latest["atr_pct"] <= MIN_ATR_PCT:
+                funnel["atr_pct"] += 1
                 continue
             if pd.isna(latest["rvol"]) or latest["rvol"] <= MIN_RVOL:
+                funnel["rvol"] += 1
                 continue
 
             # 5. Trend Alignment: Close must be above SMA-20 (no falling knives)
             if pd.isna(latest["sma_20"]) or latest["close"] <= latest["sma_20"]:
+                funnel["sma_20"] += 1
                 continue
 
             # 6. Green Candle: Close > Open (buyers maintained control today)
             if latest["close"] <= latest["open"]:
+                funnel["green_candle"] += 1
                 continue
 
             # 7. RSI(14) between 40-75: momentum present but not overbought
             if pd.isna(latest.get("rsi_14")) or latest["rsi_14"] < MIN_RSI_14 or latest["rsi_14"] > MAX_RSI_14:
+                funnel["rsi_14"] += 1
                 continue
 
             # 8. Close > SMA-50: intermediate trend confirmation
             if pd.isna(latest.get("sma_50")) or latest["close"] <= latest["sma_50"]:
+                funnel["sma_50"] += 1
                 continue
 
             # 9. 5-day return < 15%: exclude stocks that already ran (mean-reversion candidates)
             if not pd.isna(latest.get("return_5d")) and latest["return_5d"] >= MAX_RETURN_5D:
+                funnel["return_5d"] += 1
                 continue
 
             # Compute momentum quality score (0-100)
@@ -233,10 +291,16 @@ def run_screener(
 
         # Sort by quality score descending (strongest first)
         signals.sort(key=lambda s: s["quality_score"], reverse=True)
+        funnel["passed"] = len(signals)
 
         logger.info(
-            "Screener found %d signals on %s (skipped: %d cooldown, %d earnings)",
-            len(signals), screen_date, skipped_cooldown, skipped_earnings,
+            "Screener funnel: %d tickers → %d insufficient_data, %d cooldown, "
+            "%d earnings, %d stale_data, %d price, %d adv, %d atr_pct, %d rvol, "
+            "%d sma_20, %d green_candle, %d rsi_14, %d sma_50, %d return_5d → %d passed",
+            funnel["total_tickers"], funnel["insufficient_data"], funnel["cooldown"],
+            funnel["earnings"], funnel["stale_data"], funnel["price"], funnel["adv"],
+            funnel["atr_pct"], funnel["rvol"], funnel["sma_20"], funnel["green_candle"],
+            funnel["rsi_14"], funnel["sma_50"], funnel["return_5d"], funnel["passed"],
         )
 
         # --- Persist signals to Postgres ---
@@ -250,6 +314,7 @@ def run_screener(
         "date": screen_date,
         "regime": regime_info,
         "signals": signals,
+        "funnel": funnel,
     }
 
 
@@ -531,10 +596,11 @@ async def run_daily_pipeline(screen_date: date | None = None) -> dict:
             check_open_trades,
         )
 
+        regime_str = result["regime"].get("regime", "Unknown")
         db = SessionLocal()
         try:
-            create_pending_trades(db, signals, "momentum")
-            create_pending_trades(db, rev_signals, "reversion")
+            create_pending_trades(db, signals, "momentum", regime=regime_str)
+            create_pending_trades(db, rev_signals, "reversion", regime=regime_str)
             fill_pending_trades(db)
             check_open_trades(db, screen_date)
         finally:

@@ -328,6 +328,24 @@ async def paper_equity_curve():
 
 
 # ------------------------------------------------------------------
+# Portfolio Backtest
+# ------------------------------------------------------------------
+
+@app.post("/api/backtest/portfolio")
+async def portfolio_backtest(months: int = Query(default=6, ge=1, le=12)):
+    """
+    Run portfolio-level backtest comparing v1 (6-filter) vs v2 (9-filter)
+    momentum screener over the specified number of months.
+
+    This is CPU-intensive and may take 2-3 minutes.
+    """
+    from run_portfolio_backtest import run_portfolio_backtest as _run_bt
+
+    result = await asyncio.to_thread(_run_bt, months)
+    return result
+
+
+# ------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------
 
