@@ -136,6 +136,8 @@ async def screener_today(
                 "atr_pct_at_trigger": signal.atr_pct_at_trigger,
                 "options_sentiment": signal.options_sentiment,
                 "put_call_ratio": signal.put_call_ratio,
+                "rsi_14": signal.rsi_14,
+                "pct_from_52w_high": signal.pct_from_52w_high,
                 "quality_score": signal.quality_score,
                 "confluence": signal.confluence or False,
                 "news": [],  # populated below

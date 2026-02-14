@@ -22,6 +22,8 @@ class SignalResponse(BaseModel):
     atr_pct_at_trigger: float
     options_sentiment: str | None = None
     put_call_ratio: float | None = None
+    rsi_14: float | None = None
+    pct_from_52w_high: float | None = None
     quality_score: float | None = None
     confluence: bool = False
     news: list[NewsArticle] = []

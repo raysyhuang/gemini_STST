@@ -102,7 +102,8 @@ def add_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
     Attach all indicator columns to a single-ticker OHLCV DataFrame (in-place).
 
     Expected input columns: open, high, low, close, volume
-    Added columns:          atr_14, atr_pct, rvol, sma_20, adv_20
+    Added columns:          atr_14, atr_pct, rvol, sma_20, adv_20,
+                            rsi_14, sma_50, high_52w, pct_from_52w_high, return_5d
     """
     df = df.sort_values("date").reset_index(drop=True)
     df["atr_14"] = compute_atr(df)
@@ -110,6 +111,12 @@ def add_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["rvol"] = compute_rvol(df)
     df["sma_20"] = compute_sma(df)
     df["adv_20"] = compute_adv(df)
+    # Momentum-specific indicators
+    df["rsi_14"] = compute_rsi(df, period=14)
+    df["sma_50"] = compute_sma(df, period=50)
+    df["high_52w"] = df["high"].rolling(window=252, min_periods=50).max()
+    df["pct_from_52w_high"] = (df["close"] / df["high_52w"] - 1) * 100
+    df["return_5d"] = df["close"].pct_change(5) * 100
     return df
 
 

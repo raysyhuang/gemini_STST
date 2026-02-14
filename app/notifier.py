@@ -90,13 +90,20 @@ def _build_message(
             badge = "\u2B50 " if confluence else ""
             lines.append(f"{badge}*{sym_esc}* — ${_escape_md(str(price))}")
 
+            rsi_14 = sig.get("rsi_14")
+            pct_52w = sig.get("pct_from_52w_high")
+
             flow_str = _format_flow(sig)
             quality_str = f"Q: {_escape_md(str(quality))}" if quality is not None else ""
             detail_parts = [
                 f"RVOL: {_escape_md(str(rvol))}",
                 f"ATR: {_escape_md(str(atr))}%",
-                flow_str,
             ]
+            if rsi_14 is not None:
+                detail_parts.append(f"RSI: {_escape_md(str(rsi_14))}")
+            if pct_52w is not None:
+                detail_parts.append(f"52w: {_escape_md(str(pct_52w))}%")
+            detail_parts.append(flow_str)
             if quality_str:
                 detail_parts.append(quality_str)
             lines.append("  " + " \\| ".join(detail_parts))

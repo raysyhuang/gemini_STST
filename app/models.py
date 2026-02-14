@@ -64,6 +64,10 @@ class ScreenerSignal(Base):
     options_sentiment = Column(String(10))   # Bullish / Bearish / Neutral
     put_call_ratio = Column(Float)
 
+    # Momentum indicators snapshot (Phase 7)
+    rsi_14 = Column(Float)              # RSI(14) at signal time
+    pct_from_52w_high = Column(Float)   # % distance from 52-week high (negative = below)
+
     # Signal quality & confluence (Phase 6)
     quality_score = Column(Float)       # 0-100 composite score
     confluence = Column(Boolean, default=False)  # True if dual-strategy overlap

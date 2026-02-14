@@ -8,6 +8,12 @@ Applies the QuantScreener filter chain to the latest market data:
   4. RVOL   > 2.0        (relative volume vs 20-day average)
   5. Trend Alignment: Close > SMA_20  (don't buy falling knives)
   6. Green Candle: Close > Open       (buyers maintained control)
+  7. RSI(14) 40-75: momentum present but not overbought
+  8. Close > SMA-50: intermediate trend confirmation
+  9. 5-day return < 15%: exclude parabolic runups (mean-reversion risk)
+
+Quality score: 6-factor model (RVOL, 52w-high proximity, RSI sweet spot,
+SMA-50 trend, candle strength, options flow).
 
 Also checks the SPY/QQQ market regime and flags a Bearish warning.
 Results are written to the screener_signals table in Postgres.
@@ -31,12 +37,15 @@ MIN_PRICE = 5.0
 MIN_ADV = 1_500_000
 MIN_ATR_PCT = 8.0
 MIN_RVOL = 2.0
+MIN_RSI_14 = 40.0
+MAX_RSI_14 = 75.0
+MAX_RETURN_5D = 15.0  # percent — exclude stocks already up >15% in 5 days
 
 # Confluence detection lookback
 CONFLUENCE_LOOKBACK_DAYS = 14
 
-# We need at least 30 trading days of history to compute 20-day indicators reliably
-LOOKBACK_CALENDAR_DAYS = 60
+# Need ~252 trading days for 52-week high; 400 calendar days covers that
+LOOKBACK_CALENDAR_DAYS = 400
 
 # Signal cooldown: suppress repeats for 5 trading days
 COOLDOWN_CALENDAR_DAYS = 7  # ~5 trading days
@@ -193,6 +202,18 @@ def run_screener(
             if latest["close"] <= latest["open"]:
                 continue
 
+            # 7. RSI(14) between 40-75: momentum present but not overbought
+            if pd.isna(latest.get("rsi_14")) or latest["rsi_14"] < MIN_RSI_14 or latest["rsi_14"] > MAX_RSI_14:
+                continue
+
+            # 8. Close > SMA-50: intermediate trend confirmation
+            if pd.isna(latest.get("sma_50")) or latest["close"] <= latest["sma_50"]:
+                continue
+
+            # 9. 5-day return < 15%: exclude stocks that already ran (mean-reversion candidates)
+            if not pd.isna(latest.get("return_5d")) and latest["return_5d"] >= MAX_RETURN_5D:
+                continue
+
             # Compute momentum quality score (0-100)
             quality = _compute_momentum_quality(latest)
 
@@ -204,6 +225,8 @@ def run_screener(
                 "trigger_price": round(float(latest["close"]), 2),
                 "rvol_at_trigger": round(float(latest["rvol"]), 2),
                 "atr_pct_at_trigger": round(float(latest["atr_pct"]), 1),
+                "rsi_14": round(float(latest["rsi_14"]), 1) if not pd.isna(latest.get("rsi_14")) else None,
+                "pct_from_52w_high": round(float(latest["pct_from_52w_high"]), 1) if not pd.isna(latest.get("pct_from_52w_high")) else None,
                 "quality_score": quality,
                 "confluence": False,  # set later by _detect_confluence
             })
@@ -230,37 +253,79 @@ def run_screener(
     }
 
 
-def _compute_momentum_quality(latest: pd.Series) -> float:
+def _compute_momentum_quality(
+    latest: pd.Series,
+    options_sentiment: str | None = None,
+) -> float:
     """
     Compute a 0-100 composite quality score for a momentum signal.
 
     Components (weighted):
-      - RVOL strength:   35%  (2.0 → 0, 5.0 → 100)
-      - ATR% strength:   25%  (8% → 0, 20% → 100)
-      - Trend strength:  20%  (close/SMA20 - 1: 0% → 0, 5% → 100)
-      - Candle strength:  20%  (body%: 0% → 0, 3% → 100)
+      - RVOL strength:          25%  (2.0 → 0, 5.0 → 100)
+      - 52-week high proximity: 20%  (within 0% → 100, 10% below → 0)
+      - RSI(14) sweet spot:     15%  (57.5 → 100, edges of 40/75 → 0)
+      - Trend alignment:        15%  (close/SMA-50 distance: 0% → 0, 10%+ → 100)
+      - Candle strength:        10%  (body%: 0% → 0, 3% → 100)
+      - Options flow:           15%  (Bullish → 100, Neutral → 50, Bearish → 0)
     """
     def _clamp(val):
         return max(0.0, min(100.0, val))
 
     rvol = float(latest["rvol"])
-    atr_pct = float(latest["atr_pct"])
     close = float(latest["close"])
     open_ = float(latest["open"])
-    sma20 = float(latest["sma_20"])
 
+    # RVOL: 2.0 → 0, 5.0 → 100
     rvol_score = _clamp((rvol - 2.0) / 3.0 * 100)
-    atr_score = _clamp((atr_pct - 8.0) / 12.0 * 100)
-    trend_score = _clamp(((close / sma20) - 1) / 0.05 * 100)
-    candle_score = _clamp((close - open_) / open_ / 0.03 * 100)
+
+    # 52-week high proximity: 0% below → 100, 10% below → 0
+    pct_from_high = float(latest.get("pct_from_52w_high", -10))
+    high_prox_score = _clamp((pct_from_high + 10) / 10 * 100)  # -10→0, 0→100
+
+    # RSI sweet spot: peaked at 57.5 (center of 40-75 band), linear falloff to edges
+    rsi = float(latest.get("rsi_14", 57.5))
+    rsi_center = 57.5
+    rsi_half_range = 17.5  # distance from center to edge (75-57.5 or 57.5-40)
+    rsi_score = _clamp((1 - abs(rsi - rsi_center) / rsi_half_range) * 100)
+
+    # Trend alignment: close/SMA-50 distance (0% → 0, 10%+ → 100)
+    sma50 = float(latest.get("sma_50", close))
+    trend_score = _clamp(((close / sma50) - 1) / 0.10 * 100) if sma50 > 0 else 0.0
+
+    # Candle strength: body as % of open (0% → 0, 3%+ → 100)
+    candle_score = _clamp((close - open_) / open_ / 0.03 * 100) if open_ > 0 else 0.0
+
+    # Options flow: Bullish → 100, Neutral/None → 50, Bearish → 0
+    options_map = {"Bullish": 100.0, "Neutral": 50.0, "Bearish": 0.0}
+    options_score = options_map.get(options_sentiment, 50.0)
 
     quality = (
-        rvol_score * 0.35
-        + atr_score * 0.25
-        + trend_score * 0.20
-        + candle_score * 0.20
+        rvol_score * 0.25
+        + high_prox_score * 0.20
+        + rsi_score * 0.15
+        + trend_score * 0.15
+        + candle_score * 0.10
+        + options_score * 0.15
     )
     return round(quality, 1)
+
+
+def _recompute_quality_with_options(
+    base_quality: float,
+    options_sentiment: str | None,
+) -> float:
+    """
+    Adjust quality score by replacing the neutral options default (50)
+    with the actual options sentiment.
+
+    The options component is 15% of the total score. During initial screening,
+    options_sentiment=None → 50/100 (neutral). Now we substitute the real value.
+    """
+    options_map = {"Bullish": 100.0, "Neutral": 50.0, "Bearish": 0.0}
+    actual_score = options_map.get(options_sentiment, 50.0)
+    # Remove neutral default contribution, add actual
+    adjusted = base_quality - 50.0 * 0.15 + actual_score * 0.15
+    return round(max(0.0, min(100.0, adjusted)), 1)
 
 
 def _detect_confluence(
@@ -327,6 +392,8 @@ def _save_signals(db: Session, signals: list[dict]) -> None:
             "atr_pct_at_trigger": s["atr_pct_at_trigger"],
             "options_sentiment": s.get("options_sentiment"),
             "put_call_ratio": s.get("put_call_ratio"),
+            "rsi_14": s.get("rsi_14"),
+            "pct_from_52w_high": s.get("pct_from_52w_high"),
             "quality_score": s.get("quality_score"),
             "confluence": s.get("confluence", False),
         }
@@ -342,6 +409,8 @@ def _save_signals(db: Session, signals: list[dict]) -> None:
             "atr_pct_at_trigger": stmt.excluded.atr_pct_at_trigger,
             "options_sentiment": stmt.excluded.options_sentiment,
             "put_call_ratio": stmt.excluded.put_call_ratio,
+            "rsi_14": stmt.excluded.rsi_14,
+            "pct_from_52w_high": stmt.excluded.pct_from_52w_high,
             "quality_score": stmt.excluded.quality_score,
             "confluence": stmt.excluded.confluence,
         },
@@ -406,11 +475,21 @@ async def run_daily_pipeline(screen_date: date | None = None) -> dict:
     all_signal_symbols = list({s["symbol"] for s in signals} | {s["symbol"] for s in rev_signals})
     options_map = await fetch_options_sentiment_batch(all_signal_symbols)
 
-    # Attach options data to momentum signals
+    # Attach options data to momentum signals and re-score quality with options sentiment
     for sig in signals:
         flow = options_map.get(sig["symbol"], {})
         sig["options_sentiment"] = flow.get("sentiment")
         sig["put_call_ratio"] = flow.get("put_call_ratio")
+
+    # Re-compute quality scores now that we have actual options sentiment
+    # (initial screening used neutral default for the options component)
+    for sig in signals:
+        sig["quality_score"] = _recompute_quality_with_options(
+            sig["quality_score"], sig.get("options_sentiment"),
+        )
+
+    # Re-sort by updated quality score
+    signals.sort(key=lambda s: s["quality_score"], reverse=True)
 
     # Attach options data to reversion signals
     for sig in rev_signals:
@@ -418,7 +497,7 @@ async def run_daily_pipeline(screen_date: date | None = None) -> dict:
         sig["options_sentiment"] = flow.get("sentiment")
         sig["put_call_ratio"] = flow.get("put_call_ratio")
 
-    # Re-persist momentum signals with options data
+    # Re-persist momentum signals with options data + updated quality
     db = SessionLocal()
     try:
         _save_signals(db, signals)

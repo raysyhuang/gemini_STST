@@ -192,6 +192,27 @@ function formatFlow(stock) {
     return '--';
 }
 
+// ---- RSI + 52-Week High helpers ----
+
+function formatRsi(rsi) {
+    if (rsi == null) return '--';
+    let color;
+    if (rsi >= 65) color = 'var(--yellow, #d29922)';       // getting warm
+    else if (rsi >= 50) color = 'var(--green, #3fb950)';    // sweet spot
+    else color = 'var(--text-muted, #8b949e)';              // low momentum
+    return `<span style="color:${color}">${rsi.toFixed(0)}</span>`;
+}
+
+function format52wHigh(pct) {
+    if (pct == null) return '--';
+    // pct is negative (e.g. -3.2 means 3.2% below 52w high)
+    let color;
+    if (pct >= -2) color = 'var(--green, #3fb950)';         // near high
+    else if (pct >= -5) color = 'var(--yellow, #d29922)';    // moderate
+    else color = 'var(--text-muted, #8b949e)';               // far from high
+    return `<span style="color:${color}">${pct.toFixed(1)}%</span>`;
+}
+
 // ---- Momentum Screener ----
 
 async function fetchScreenerData() {
@@ -251,6 +272,8 @@ function renderMomentumSignals() {
         tr.innerHTML = `
             <td>${formatTicker(stock)}</td>
             <td>${formatQualityScore(stock.quality_score)}</td>
+            <td>${formatRsi(stock.rsi_14)}</td>
+            <td>${format52wHigh(stock.pct_from_52w_high)}</td>
             <td>${stock.rvol_at_trigger.toFixed(2)}</td>
             <td>${stock.atr_pct_at_trigger.toFixed(1)}%</td>
             <td>${formatPositionSize(stock.atr_pct_at_trigger)}</td>
