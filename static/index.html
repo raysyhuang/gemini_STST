@@ -15,8 +15,14 @@
         <!-- ===== LEFT SIDEBAR: Screener Panel ===== -->
         <aside class="screener-panel">
             <div class="panel-header">
-                <h2>Momentum Triggers</h2>
+                <h2 id="panel-title">Momentum Triggers</h2>
                 <span id="screener-date" class="date-badge"></span>
+            </div>
+
+            <!-- Strategy toggle -->
+            <div class="strategy-toggle">
+                <button id="btn-momentum" class="toggle-btn active" onclick="switchView('momentum')">Momentum</button>
+                <button id="btn-reversion" class="toggle-btn" onclick="switchView('reversion')">Oversold</button>
             </div>
 
             <div id="market-regime-warning" class="regime-banner hidden">
@@ -33,6 +39,7 @@
                 <p class="muted">The screener runs daily after market close.</p>
             </div>
 
+            <!-- Momentum table -->
             <table id="screener-table" class="hidden">
                 <thead>
                     <tr>
@@ -43,6 +50,19 @@
                     </tr>
                 </thead>
                 <tbody id="screener-body"></tbody>
+            </table>
+
+            <!-- Reversion table -->
+            <table id="reversion-table" class="hidden">
+                <thead>
+                    <tr>
+                        <th>Ticker</th>
+                        <th>RSI(2)</th>
+                        <th>3d Drop</th>
+                        <th>Price</th>
+                    </tr>
+                </thead>
+                <tbody id="reversion-body"></tbody>
             </table>
 
             <!-- News panel (populated when a row is clicked) -->

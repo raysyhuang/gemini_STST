@@ -83,6 +83,49 @@ html, body {
     border-radius: 4px;
 }
 
+/* Strategy toggle */
+
+.strategy-toggle {
+    display: flex;
+    gap: 0;
+    padding: 12px 20px 0;
+}
+
+.toggle-btn {
+    flex: 1;
+    padding: 8px 0;
+    font-family: var(--font-sans);
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-muted);
+    background: transparent;
+    border: 1px solid var(--border);
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.toggle-btn:first-child {
+    border-radius: 6px 0 0 6px;
+}
+
+.toggle-btn:last-child {
+    border-radius: 0 6px 6px 0;
+    border-left: none;
+}
+
+.toggle-btn.active {
+    color: var(--text-primary);
+    background: var(--accent-glow);
+    border-color: var(--accent);
+}
+
+.toggle-btn:not(.active):hover {
+    color: var(--text-secondary);
+    background: var(--bg-hover);
+}
+
 /* Regime banners */
 
 .regime-banner {
@@ -125,12 +168,14 @@ html, body {
 
 /* Screener table */
 
-#screener-table {
+#screener-table,
+#reversion-table {
     width: 100%;
     border-collapse: collapse;
 }
 
-#screener-table thead th {
+#screener-table thead th,
+#reversion-table thead th {
     position: sticky;
     top: 0;
     z-index: 2;
@@ -145,33 +190,40 @@ html, body {
     border-bottom: 1px solid var(--border);
 }
 
-#screener-table thead th:nth-child(n+2) { text-align: right; }
+#screener-table thead th:nth-child(n+2),
+#reversion-table thead th:nth-child(n+2) { text-align: right; }
 
-#screener-table tbody tr {
+#screener-table tbody tr,
+#reversion-table tbody tr {
     cursor: pointer;
     transition: background 0.15s;
 }
 
-#screener-table tbody tr:hover { background: var(--bg-hover); }
+#screener-table tbody tr:hover,
+#reversion-table tbody tr:hover { background: var(--bg-hover); }
 
-#screener-table tbody tr.active {
+#screener-table tbody tr.active,
+#reversion-table tbody tr.active {
     background: var(--accent-glow);
     border-left: 3px solid var(--accent);
 }
 
-#screener-table tbody td {
+#screener-table tbody td,
+#reversion-table tbody td {
     padding: 10px 12px;
     font-size: 13px;
     border-bottom: 1px solid rgba(48,54,61,0.5);
 }
 
-#screener-table tbody td:nth-child(n+2) {
+#screener-table tbody td:nth-child(n+2),
+#reversion-table tbody td:nth-child(n+2) {
     text-align: right;
     font-family: var(--font-mono);
     font-size: 12px;
 }
 
-#screener-table tbody td:first-child {
+#screener-table tbody td:first-child,
+#reversion-table tbody td:first-child {
     font-weight: 600;
     color: var(--accent);
 }

@@ -37,6 +37,23 @@ class ScreenerResponse(BaseModel):
     signals: list[SignalResponse]
 
 
+class ReversionSignalResponse(BaseModel):
+    ticker: str
+    company_name: str
+    date: date
+    trigger_price: float
+    rsi2: float
+    drawdown_3d_pct: float
+    sma_distance_pct: float
+
+    model_config = {"from_attributes": True}
+
+
+class ReversionScreenerResponse(BaseModel):
+    date: date
+    signals: list[ReversionSignalResponse]
+
+
 class BacktestResultResponse(BaseModel):
     ticker: str
     win_rate: float

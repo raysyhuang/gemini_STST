@@ -52,6 +52,25 @@ def compute_rvol(df: pd.DataFrame, period: int = 20) -> pd.Series:
     return rvol
 
 
+def compute_rsi(df: pd.DataFrame, period: int = 2) -> pd.Series:
+    """
+    Compute the Relative Strength Index over *period* days.
+
+    Uses the Wilder smoothing method (exponential moving average).
+    Default period=2 for mean-reversion setups (Larry Connors RSI-2).
+    """
+    delta = df["close"].diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = (-delta).where(delta < 0, 0.0)
+
+    avg_gain = gain.ewm(alpha=1.0 / period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1.0 / period, min_periods=period, adjust=False).mean()
+
+    rs = avg_gain / avg_loss
+    rsi = 100.0 - (100.0 / (1.0 + rs))
+    return rsi
+
+
 def compute_sma(df: pd.DataFrame, column: str = "close", period: int = 20) -> pd.Series:
     """Simple Moving Average over *period* days."""
     return df[column].rolling(window=period, min_periods=period).mean()

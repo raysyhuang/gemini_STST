@@ -28,6 +28,8 @@ from app.schemas import (
     BacktestResultResponse,
     MarketRegimeResponse,
     NewsArticle,
+    ReversionScreenerResponse,
+    ReversionSignalResponse,
     ScreenerResponse,
     SignalResponse,
 )
@@ -140,6 +142,30 @@ async def screener_today():
         date=today,
         regime=MarketRegimeResponse(**regime),
         signals=[SignalResponse(**s) for s in signals],
+    )
+
+
+@app.get("/api/reversion/today", response_model=ReversionScreenerResponse)
+async def reversion_today():
+    """
+    Return today's mean-reversion (oversold bounce) signals.
+    Criteria: RSI(2) < 10, 3-day drawdown >= 15%, Close > SMA-200.
+    """
+    from app.mean_reversion import run_reversion_screener
+
+    result = await asyncio.to_thread(run_reversion_screener)
+
+    return ReversionScreenerResponse(
+        date=result["date"],
+        signals=[ReversionSignalResponse(
+            ticker=s["symbol"],
+            company_name=s.get("company_name", ""),
+            date=s["date"],
+            trigger_price=s["trigger_price"],
+            rsi2=s["rsi2"],
+            drawdown_3d_pct=s["drawdown_3d_pct"],
+            sma_distance_pct=s["sma_distance_pct"],
+        ) for s in result["signals"]],
     )
 
 

@@ -55,11 +55,16 @@ window.addEventListener('resize', () => {
 });
 
 // ---- State ----
-let screenerData = null; // Cached screener response
+let screenerData = null;    // Cached momentum screener response
+let reversionData = null;   // Cached reversion screener response
+let activeView = 'momentum'; // 'momentum' | 'reversion'
 
 // ---- DOM references ----
+const panelTitle     = document.getElementById('panel-title');
 const screenerBody   = document.getElementById('screener-body');
 const screenerTable  = document.getElementById('screener-table');
+const reversionBody  = document.getElementById('reversion-body');
+const reversionTable = document.getElementById('reversion-table');
 const screenerEmpty  = document.getElementById('screener-empty');
 const screenerDate   = document.getElementById('screener-date');
 const regimeWarn     = document.getElementById('market-regime-warning');
@@ -70,8 +75,34 @@ const newsLabel      = document.getElementById('news-ticker-label');
 const activeTicker   = document.getElementById('active-ticker');
 const chartPlaceholder = document.getElementById('chart-placeholder');
 const loadingOverlay = document.getElementById('loading-overlay');
+const btnMomentum    = document.getElementById('btn-momentum');
+const btnReversion   = document.getElementById('btn-reversion');
 
-// ---- Screener ----
+// ---- View toggle ----
+
+function switchView(view) {
+    activeView = view;
+
+    // Toggle button active states
+    btnMomentum.classList.toggle('active', view === 'momentum');
+    btnReversion.classList.toggle('active', view === 'reversion');
+
+    // Update panel title
+    panelTitle.textContent = view === 'momentum' ? 'Momentum Triggers' : 'Oversold Reversions';
+
+    // Hide news panel on switch
+    newsPanel.classList.add('hidden');
+
+    if (view === 'momentum') {
+        reversionTable.classList.add('hidden');
+        renderMomentumSignals();
+    } else {
+        screenerTable.classList.add('hidden');
+        renderReversionSignals();
+    }
+}
+
+// ---- Momentum Screener ----
 
 async function fetchScreenerData() {
     try {
@@ -91,36 +122,41 @@ async function fetchScreenerData() {
             regimeBull.classList.remove('hidden');
         }
 
-        // Signals
-        if (data.signals.length === 0) {
-            screenerTable.classList.add('hidden');
-            screenerEmpty.classList.remove('hidden');
-            return;
+        if (activeView === 'momentum') {
+            renderMomentumSignals();
         }
-
-        screenerEmpty.classList.add('hidden');
-        screenerTable.classList.remove('hidden');
-        screenerBody.innerHTML = '';
-
-        data.signals.forEach((stock, idx) => {
-            const tr = document.createElement('tr');
-            tr.dataset.idx = idx;
-            tr.innerHTML = `
-                <td>${stock.ticker}</td>
-                <td>${stock.rvol_at_trigger.toFixed(2)}</td>
-                <td>${stock.atr_pct_at_trigger.toFixed(1)}%</td>
-                <td>$${stock.trigger_price.toFixed(2)}</td>
-            `;
-            tr.addEventListener('click', () => onTickerClick(idx));
-            screenerBody.appendChild(tr);
-        });
 
     } catch (err) {
         console.error('Error fetching screener data:', err);
     }
 }
 
-function onTickerClick(idx) {
+function renderMomentumSignals() {
+    if (!screenerData || screenerData.signals.length === 0) {
+        screenerTable.classList.add('hidden');
+        screenerEmpty.classList.remove('hidden');
+        return;
+    }
+
+    screenerEmpty.classList.add('hidden');
+    screenerTable.classList.remove('hidden');
+    screenerBody.innerHTML = '';
+
+    screenerData.signals.forEach((stock, idx) => {
+        const tr = document.createElement('tr');
+        tr.dataset.idx = idx;
+        tr.innerHTML = `
+            <td>${stock.ticker}</td>
+            <td>${stock.rvol_at_trigger.toFixed(2)}</td>
+            <td>${stock.atr_pct_at_trigger.toFixed(1)}%</td>
+            <td>$${stock.trigger_price.toFixed(2)}</td>
+        `;
+        tr.addEventListener('click', () => onMomentumClick(idx));
+        screenerBody.appendChild(tr);
+    });
+}
+
+function onMomentumClick(idx) {
     const stock = screenerData.signals[idx];
 
     // Highlight active row
@@ -129,6 +165,63 @@ function onTickerClick(idx) {
 
     // Show news
     showNews(stock);
+
+    // Load backtest
+    loadBacktest(stock.ticker);
+}
+
+// ---- Reversion Screener ----
+
+async function fetchReversionData() {
+    try {
+        const resp = await fetch('/api/reversion/today');
+        const data = await resp.json();
+        reversionData = data;
+
+        if (activeView === 'reversion') {
+            screenerDate.textContent = data.date;
+            renderReversionSignals();
+        }
+
+    } catch (err) {
+        console.error('Error fetching reversion data:', err);
+    }
+}
+
+function renderReversionSignals() {
+    if (!reversionData || reversionData.signals.length === 0) {
+        reversionTable.classList.add('hidden');
+        screenerEmpty.classList.remove('hidden');
+        return;
+    }
+
+    screenerEmpty.classList.add('hidden');
+    reversionTable.classList.remove('hidden');
+    reversionBody.innerHTML = '';
+
+    reversionData.signals.forEach((stock, idx) => {
+        const tr = document.createElement('tr');
+        tr.dataset.idx = idx;
+        tr.innerHTML = `
+            <td>${stock.ticker}</td>
+            <td>${stock.rsi2.toFixed(1)}</td>
+            <td>${stock.drawdown_3d_pct.toFixed(1)}%</td>
+            <td>$${stock.trigger_price.toFixed(2)}</td>
+        `;
+        tr.addEventListener('click', () => onReversionClick(idx));
+        reversionBody.appendChild(tr);
+    });
+}
+
+function onReversionClick(idx) {
+    const stock = reversionData.signals[idx];
+
+    // Highlight active row
+    document.querySelectorAll('#reversion-body tr').forEach(r => r.classList.remove('active'));
+    document.querySelector(`#reversion-body tr[data-idx="${idx}"]`).classList.add('active');
+
+    // Hide news (reversion doesn't have inline news)
+    newsPanel.classList.add('hidden');
 
     // Load backtest
     loadBacktest(stock.ticker);
@@ -204,4 +297,6 @@ async function loadBacktest(ticker) {
 }
 
 // ---- Init ----
+// Fetch both datasets in parallel on page load
 fetchScreenerData();
+fetchReversionData();
