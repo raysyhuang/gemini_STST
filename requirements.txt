@@ -16,6 +16,7 @@ numpy==1.26.4
 
 # Backtesting Engine (Phase 2)
 vectorbt==0.26.2
+plotly>=5.0.0,<6.0.0
 
 # SSL certificates
 certifi
