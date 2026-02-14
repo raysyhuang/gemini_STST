@@ -52,7 +52,7 @@ MOMENTUM_STOP_MULT = 3.5            # tuned from 2.0 → 3.5 (parameter sweep)
 # Trailing stop: sl_stop = MOMENTUM_STOP_MULT * ATR(14) / close with sl_trail=True (Chandelier exit)
 
 # Mean Reversion strategy
-REVERSION_HOLD_DAYS = 5
+REVERSION_HOLD_DAYS = 3              # tuned from 5 → 3 (parameter sweep)
 REVERSION_STOP = 0.05      # 5% hard stop-loss
 
 

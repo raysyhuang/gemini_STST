@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 # ── Constants (match backtester) ──────────────────────────────────
 MOMENTUM_HOLD_DAYS = 10              # tuned from 7 → 10 (sweep rank #1)
-REVERSION_HOLD_DAYS = 5
+REVERSION_HOLD_DAYS = 3              # tuned from 5 → 3 (reversion sweep rank #1)
 REVERSION_STOP = 0.05       # 5% hard stop-loss
 SLIPPAGE = 0.002             # 20 bps
 FEES = 0.001                 # 0.1% each leg
@@ -46,9 +46,9 @@ MOMENTUM_STOP_MULT = 3.5            # tuned from 2.0 → 3.5 (sweep rank #1)
 
 # Exit strategy: profit targets + hold extension
 MOMENTUM_PROFIT_TARGET = 0.10    # +10% → take profit
-REVERSION_PROFIT_TARGET = 0.05   # +5% → take profit
+REVERSION_PROFIT_TARGET = 0.10   # tuned from 5% → 10% (reversion sweep rank #1)
 EXTENDED_MOMENTUM_HOLD = 14      # high-quality: 14 days (was 10, scaled with new hold)
-EXTENDED_REVERSION_HOLD = 7      # high-quality: 7 days (was 5)
+EXTENDED_REVERSION_HOLD = 5      # high-quality: 5 days (scaled with new hold of 3)
 QUALITY_EXTENSION_THRESHOLD = 70  # Q >= 70 to qualify for extension
 
 # Signal quality gate
