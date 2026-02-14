@@ -20,3 +20,7 @@ if DATABASE_URL.startswith("postgres://"):
 ASYNC_DATABASE_URL: str = DATABASE_URL.replace(
     "postgresql://", "postgresql+asyncpg://", 1
 ) if DATABASE_URL else ""
+
+# Telegram Alerts
+TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "").strip()

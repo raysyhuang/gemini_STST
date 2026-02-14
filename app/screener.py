@@ -6,6 +6,8 @@ Applies the QuantScreener filter chain to the latest market data:
   2. ADV    > 1,500,000  (20-day average daily volume)
   3. ATR%   > 8%         (projected weekly volatility)
   4. RVOL   > 2.0        (relative volume vs 20-day average)
+  5. Trend Alignment: Close > SMA_20  (don't buy falling knives)
+  6. Green Candle: Close > Open       (buyers maintained control)
 
 Also checks the SPY/QQQ market regime and flags a Bearish warning.
 Results are written to the screener_signals table in Postgres.
@@ -126,6 +128,14 @@ def run_screener(screen_date: date | None = None) -> dict:
             if pd.isna(latest["rvol"]) or latest["rvol"] <= MIN_RVOL:
                 continue
 
+            # 5. Trend Alignment: Close must be above SMA-20 (no falling knives)
+            if pd.isna(latest["sma_20"]) or latest["close"] <= latest["sma_20"]:
+                continue
+
+            # 6. Green Candle: Close > Open (buyers maintained control today)
+            if latest["close"] <= latest["open"]:
+                continue
+
             signals.append({
                 "ticker_id": tkr.id,
                 "symbol": tkr.symbol,
@@ -182,3 +192,36 @@ def _save_signals(db: Session, signals: list[dict]) -> None:
     db.execute(stmt)
     db.commit()
     logger.info("Saved %d signals to Postgres", len(values))
+
+
+# ------------------------------------------------------------------
+# Full daily pipeline (screener + news enrichment + Telegram alert)
+# ------------------------------------------------------------------
+
+async def run_daily_pipeline(screen_date: date | None = None) -> dict:
+    """
+    End-to-end daily pipeline called by the cron job:
+      1. Run the screener
+      2. Fetch Finnhub news for each signal
+      3. Send Telegram alert
+    Returns the screener result dict.
+    """
+    import asyncio
+    from app.news_fetcher import fetch_news
+    from app.notifier import send_telegram_alert
+
+    result = run_screener(screen_date)
+    signals = result["signals"]
+
+    # Fetch news for all signals concurrently
+    news_map: dict[str, list[dict]] = {}
+    if signals:
+        tasks = [fetch_news(s["symbol"], limit=3) for s in signals]
+        news_results = await asyncio.gather(*tasks)
+        for sig, articles in zip(signals, news_results):
+            news_map[sig["symbol"]] = articles
+
+    # Send Telegram notification
+    await send_telegram_alert(result, news_map)
+
+    return result
