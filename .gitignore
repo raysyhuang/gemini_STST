@@ -1,9 +1,25 @@
+# Secrets — NEVER commit
 .env
+.env.*
+
+# Python
 venv/
 __pycache__/
 *.pyc
+*.pyo
+
+# Database files — no SQLite allowed
+*.db
+*.sqlite
+*.sqlite3
+
+# IDE / tooling
 .cursor/
 .claude/
-*.png
+.vscode/
+.idea/
+
+# OS & misc
 .DS_Store
+*.png
 .playwright-mcp/
