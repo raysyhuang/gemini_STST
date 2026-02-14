@@ -27,13 +27,14 @@ def _escape_md(text: str) -> str:
     return text
 
 
-def _build_message(screener_result: dict, news_map: dict[str, list[dict]]) -> str:
+def _build_message(
+    screener_result: dict,
+    news_map: dict[str, list[dict]],
+    reversion_result: dict | None = None,
+) -> str:
     """
-    Build a Telegram MarkdownV2 message from the screener result.
-
-    Args:
-        screener_result: output of run_screener()
-        news_map: {symbol: [{"headline":...}, ...]}
+    Build a unified Telegram MarkdownV2 message with both momentum
+    and mean-reversion signals.
     """
     d = screener_result["date"]
     regime = screener_result["regime"]
@@ -55,30 +56,49 @@ def _build_message(screener_result: dict, news_map: dict[str, list[dict]]) -> st
         lines.append(_escape_md("⚠️ Bearish Regime — exercise caution"))
         lines.append("")
 
-    if not signals:
-        lines.append(_escape_md(f"Screener Run Complete: 0 Signals."))
-        return "\n".join(lines)
-
-    lines.append(f"*{len(signals)} Signal{'s' if len(signals) != 1 else ''}:*")
+    # --- Momentum Section ---
+    n_mom = len(signals)
+    lines.append(f"*— MOMENTUM BREAKOUTS \\({n_mom}\\) —*")
     lines.append("")
 
-    for sig in signals:
-        sym = sig["symbol"]
-        price = sig["trigger_price"]
-        rvol = sig["rvol_at_trigger"]
-        atr = sig["atr_pct_at_trigger"]
-
-        sym_esc = _escape_md(sym)
-        lines.append(f"*{sym_esc}* — ${_escape_md(str(price))}")
-        lines.append(f"  RVOL: {_escape_md(str(rvol))} \\| ATR: {_escape_md(str(atr))}%")
-
-        # Append up to 2 headlines if available
-        articles = news_map.get(sym, [])
-        for article in articles[:2]:
-            headline = _escape_md(article.get("headline", ""))
-            lines.append(f"  • {headline}")
-
+    if not signals:
+        lines.append(_escape_md("No momentum signals today."))
         lines.append("")
+    else:
+        for sig in signals:
+            sym = sig["symbol"]
+            price = sig["trigger_price"]
+            rvol = sig["rvol_at_trigger"]
+            atr = sig["atr_pct_at_trigger"]
+
+            sym_esc = _escape_md(sym)
+            lines.append(f"*{sym_esc}* — ${_escape_md(str(price))}")
+            lines.append(f"  RVOL: {_escape_md(str(rvol))} \\| ATR: {_escape_md(str(atr))}%")
+
+            articles = news_map.get(sym, [])
+            for article in articles[:2]:
+                headline = _escape_md(article.get("headline", ""))
+                lines.append(f"  • {headline}")
+
+            lines.append("")
+
+    # --- Reversion Section ---
+    rev_signals = reversion_result.get("signals", []) if reversion_result else []
+    n_rev = len(rev_signals)
+    lines.append(f"*— OVERSOLD REVERSIONS \\({n_rev}\\) —*")
+    lines.append("")
+
+    if not rev_signals:
+        lines.append(_escape_md("No oversold reversals today."))
+    else:
+        for sig in rev_signals:
+            sym_esc = _escape_md(sig["symbol"])
+            price_esc = _escape_md(str(sig["trigger_price"]))
+            rsi_esc = _escape_md(str(sig["rsi2"]))
+            dd_esc = _escape_md(str(sig["drawdown_3d_pct"]))
+            lines.append(f"*{sym_esc}* — ${price_esc}")
+            lines.append(f"  RSI\\(2\\): {rsi_esc} \\| 3d Drop: {dd_esc}%")
+            lines.append("")
 
     return "\n".join(lines)
 
@@ -86,9 +106,10 @@ def _build_message(screener_result: dict, news_map: dict[str, list[dict]]) -> st
 async def send_telegram_alert(
     screener_result: dict,
     news_map: dict[str, list[dict]] | None = None,
+    reversion_result: dict | None = None,
 ) -> bool:
     """
-    Send the daily screener summary to Telegram.
+    Send the unified daily summary (momentum + reversion) to Telegram.
 
     Returns True on success, False on failure.
     """
@@ -99,7 +120,7 @@ async def send_telegram_alert(
     if news_map is None:
         news_map = {}
 
-    message = _build_message(screener_result, news_map)
+    message = _build_message(screener_result, news_map, reversion_result)
 
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,

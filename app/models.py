@@ -17,6 +17,7 @@ class Ticker(Base):
 
     market_data = relationship("DailyMarketData", back_populates="ticker")
     signals = relationship("ScreenerSignal", back_populates="ticker")
+    reversion_signals = relationship("ReversionSignal", back_populates="ticker")
 
 
 class DailyMarketData(Base):
@@ -62,4 +63,23 @@ class ScreenerSignal(Base):
 
     __table_args__ = (
         UniqueConstraint("ticker_id", "date", name="uq_signal_ticker_date"),
+    )
+
+
+class ReversionSignal(Base):
+    __tablename__ = "reversion_signals"
+
+    id = Column(Integer, primary_key=True)
+    ticker_id = Column(Integer, ForeignKey("tickers.id"), nullable=False)
+    date = Column(Date, nullable=False, index=True)
+
+    trigger_price = Column(Float, nullable=False)
+    rsi2_at_trigger = Column(Float, nullable=False)
+    drawdown_3d_pct = Column(Float, nullable=False)
+    sma_distance_pct = Column(Float, nullable=False)
+
+    ticker = relationship("Ticker", back_populates="reversion_signals")
+
+    __table_args__ = (
+        UniqueConstraint("ticker_id", "date", name="uq_reversion_signal_ticker_date"),
     )

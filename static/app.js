@@ -166,8 +166,8 @@ function onMomentumClick(idx) {
     // Show news
     showNews(stock);
 
-    // Load backtest
-    loadBacktest(stock.ticker);
+    // Load backtest (momentum strategy)
+    loadBacktest(stock.ticker, 'momentum');
 }
 
 // ---- Reversion Screener ----
@@ -223,8 +223,8 @@ function onReversionClick(idx) {
     // Hide news (reversion doesn't have inline news)
     newsPanel.classList.add('hidden');
 
-    // Load backtest
-    loadBacktest(stock.ticker);
+    // Load backtest (reversion strategy)
+    loadBacktest(stock.ticker, 'reversion');
 }
 
 // ---- News ----
@@ -252,8 +252,9 @@ function showNews(stock) {
 
 // ---- Backtest ----
 
-async function loadBacktest(ticker) {
-    activeTicker.textContent = `Backtest: ${ticker}`;
+async function loadBacktest(ticker, strategy = 'momentum') {
+    const label = strategy === 'reversion' ? 'Reversion BT' : 'Backtest';
+    activeTicker.textContent = `${label}: ${ticker}`;
     chartPlaceholder.classList.add('hidden');
     loadingOverlay.classList.remove('hidden');
 
@@ -263,7 +264,7 @@ async function loadBacktest(ticker) {
     }
 
     try {
-        const resp = await fetch(`/api/backtest/${ticker}`);
+        const resp = await fetch(`/api/backtest/${ticker}?strategy=${strategy}`);
         if (!resp.ok) {
             const err = await resp.json();
             console.error('Backtest error:', err.detail);

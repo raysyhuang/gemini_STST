@@ -1,10 +1,18 @@
 """
 VectorBT backtesting engine with memory-safe batch processing.
 
-Strategy:
-  - Entry  : RVOL > 2.0  AND  ATR% > 8.0
-  - Exit   : 7 trading days after entry (time-based)
-  - Stop   : 3% hard stop-loss (sl_stop=0.03) — exits early if triggered
+Dual-strategy support:
+  Momentum:
+    - Entry  : RVOL > 2.0  AND  ATR% > 8.0
+    - Exit   : 7 trading days after entry (time-based)
+    - Stop   : Chandelier trailing stop (2 * ATR via sl_trail=True)
+
+  Mean Reversion:
+    - Entry  : RSI(2) < 10  AND  3-day drawdown >= 15%
+    - Exit   : 5 trading days after entry (time-based)
+    - Stop   : 5% hard stop-loss
+
+Both strategies execute at T+1 open with 20 bps slippage (no look-ahead bias).
 
 Architecture:
   - Tickers are processed in batches of 500 to stay under Heroku RAM limits.
@@ -24,16 +32,23 @@ from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
 from app.models import Ticker, DailyMarketData
-from app.indicators import compute_atr_pct, compute_rvol
+from app.indicators import compute_atr_pct, compute_rvol, compute_rsi
 
 logger = logging.getLogger(__name__)
 
 BATCH_SIZE = 500
-HOLD_DAYS = 7
-STOP_LOSS = 0.03   # 3% hard stop-loss — STRICT REQUIREMENT
 FEES = 0.001        # 0.1% round-trip commissions
 SLIPPAGE = 0.002    # 20 bps per side — realistic for small-cap spreads
-SIZE = 0.10          # 10% of equity per trade (fixed-fractional sizing)
+SIZE = 0.10         # 10% of equity per trade (fixed-fractional sizing)
+
+# Momentum strategy
+MOMENTUM_HOLD_DAYS = 7
+# Trailing stop: sl_stop = 2 * ATR(14) / close with sl_trail=True (Chandelier exit)
+# For ATR%=10% stocks, trail distance ≈ 8.9% from highest high since entry
+
+# Mean Reversion strategy
+REVERSION_HOLD_DAYS = 5
+REVERSION_STOP = 0.05      # 5% hard stop-loss
 
 
 # ------------------------------------------------------------------
@@ -83,56 +98,93 @@ def _run_batch(
     open_df: pd.DataFrame,
     rvol_df: pd.DataFrame,
     atr_pct_df: pd.DataFrame,
+    strategy_type: str = "momentum",
+    rsi2_df: pd.DataFrame | None = None,
+    drawdown_3d_df: pd.DataFrame | None = None,
 ) -> list[dict]:
     """
     Run the VectorBT simulation on a batch of tickers (wide DataFrames).
+
+    strategy_type:
+      "momentum"  — RVOL > 2.0 AND ATR% > 8.0, 7-day hold, Chandelier trailing stop
+      "reversion" — RSI(2) < 10 AND 3-day drawdown >= 15%, 5-day hold, 5% hard stop
 
     Returns a list of per-ticker metric dicts.
     """
     # Align all DataFrames to the same date index (drop leading NaN rows
     # from indicator rolling windows so shapes match for vectorbt broadcast)
-    common_idx = price_df.dropna(how="all").index \
-        .intersection(open_df.dropna(how="all").index) \
-        .intersection(rvol_df.dropna(how="all").index) \
-        .intersection(atr_pct_df.dropna(how="all").index)
+    dfs_to_align = [price_df, open_df, atr_pct_df]
+    if strategy_type == "momentum":
+        dfs_to_align.append(rvol_df)
+    if rsi2_df is not None:
+        dfs_to_align.append(rsi2_df)
+    if drawdown_3d_df is not None:
+        dfs_to_align.append(drawdown_3d_df)
+
+    common_idx = dfs_to_align[0].dropna(how="all").index
+    for _df in dfs_to_align[1:]:
+        common_idx = common_idx.intersection(_df.dropna(how="all").index)
+
     price_df = price_df.loc[common_idx]
     open_df = open_df.loc[common_idx]
-    rvol_df = rvol_df.loc[common_idx]
     atr_pct_df = atr_pct_df.loc[common_idx]
+    if strategy_type == "momentum":
+        rvol_df = rvol_df.loc[common_idx]
+    if rsi2_df is not None:
+        rsi2_df = rsi2_df.loc[common_idx]
+    if drawdown_3d_df is not None:
+        drawdown_3d_df = drawdown_3d_df.loc[common_idx]
 
     if price_df.empty:
         return []
 
-    # 1. Entry signals: RVOL > 2.0 AND ATR% > 8.0
-    raw_entries = (rvol_df > 2.0) & (atr_pct_df > 8.0)
+    # Build entry/exit signals and run portfolio based on strategy
+    if strategy_type == "reversion":
+        # Mean Reversion: RSI(2) < 10 AND 3-day drawdown >= 15%
+        raw_entries = (rsi2_df < 10.0) & (drawdown_3d_df <= -0.15)
+        entries = raw_entries.shift(1).fillna(False).astype(bool)
+        exits = entries.shift(REVERSION_HOLD_DAYS).fillna(False).astype(bool)
 
-    # P0 FIX: Shift entries forward by 1 day to eliminate look-ahead bias.
-    # Signal fires on day T close; we can only execute on day T+1 open.
-    entries = raw_entries.shift(1)
-    entries = entries.fillna(False).astype(bool)
+        portfolio = vbt.Portfolio.from_signals(
+            close=price_df,
+            open=open_df,
+            entries=entries,
+            exits=exits,
+            sl_stop=REVERSION_STOP,
+            freq="1D",
+            fees=FEES,
+            slippage=SLIPPAGE,
+            init_cash=10_000,
+            size=SIZE,
+            size_type="percent",
+            accumulate=False,
+        )
+    else:
+        # Momentum: RVOL > 2.0 AND ATR% > 8.0
+        raw_entries = (rvol_df > 2.0) & (atr_pct_df > 8.0)
+        entries = raw_entries.shift(1).fillna(False).astype(bool)
+        exits = entries.shift(MOMENTUM_HOLD_DAYS).fillna(False).astype(bool)
 
-    # 2. Time-based exits: 7 trading days after the *shifted* entry
-    exits = entries.shift(HOLD_DAYS)
-    exits = exits.fillna(False).astype(bool)
+        # Chandelier trailing stop: 2 * daily ATR as fraction of price
+        # ATR% = (ATR/close) * sqrt(5) * 100  →  daily ATR/close = ATR%/(sqrt(5)*100)
+        # sl_trail=True makes sl_stop trail from highest high since entry
+        chandelier_df = 2.0 * atr_pct_df / (np.sqrt(5) * 100.0)
 
-    # 3. Run the portfolio simulation with 3% hard stop-loss
-    #    - open=open_df: execute entries/exits at the open price (not close)
-    #    - slippage=SLIPPAGE: 20 bps per side for small-cap spread realism
-    #    - size=SIZE, size_type="percent": risk 10% of equity per trade
-    portfolio = vbt.Portfolio.from_signals(
-        close=price_df,
-        open=open_df,
-        entries=entries,
-        exits=exits,
-        sl_stop=STOP_LOSS,
-        freq="1D",
-        fees=FEES,
-        slippage=SLIPPAGE,
-        init_cash=10_000,
-        size=SIZE,
-        size_type="percent",
-        accumulate=False,     # One position at a time per ticker
-    )
+        portfolio = vbt.Portfolio.from_signals(
+            close=price_df,
+            open=open_df,
+            entries=entries,
+            exits=exits,
+            sl_stop=chandelier_df,
+            sl_trail=True,
+            freq="1D",
+            fees=FEES,
+            slippage=SLIPPAGE,
+            init_cash=10_000,
+            size=SIZE,
+            size_type="percent",
+            accumulate=False,
+        )
 
     # 4. Extract per-ticker metrics
     results: list[dict] = []
@@ -202,13 +254,22 @@ def _run_batch(
 # Per-ticker indicator computation on wide DataFrames
 # ------------------------------------------------------------------
 
-def _compute_wide_indicators(df: pd.DataFrame, id_to_symbol: dict) -> tuple:
+def _compute_wide_indicators(
+    df: pd.DataFrame,
+    id_to_symbol: dict,
+    strategy_type: str = "momentum",
+) -> tuple:
     """
     Given a long-format DataFrame, compute per-ticker indicators and return
-    wide (pivoted) DataFrames: price_df, open_df, rvol_df, atr_pct_df.
+    wide (pivoted) DataFrames.
+
+    For momentum:  returns (price_df, open_df, rvol_df, atr_pct_df)
+    For reversion: returns (price_df, open_df, rvol_df, atr_pct_df, rsi2_df, drawdown_3d_df)
     """
     all_rvol = []
     all_atr_pct = []
+    all_rsi2 = []
+    all_drawdown_3d = []
 
     for tid, group in df.groupby("ticker_id"):
         group = group.sort_values("date").reset_index(drop=True)
@@ -216,6 +277,12 @@ def _compute_wide_indicators(df: pd.DataFrame, id_to_symbol: dict) -> tuple:
         group["atr_pct"] = compute_atr_pct(group)
         all_rvol.append(group[["date", "ticker_id", "rvol"]])
         all_atr_pct.append(group[["date", "ticker_id", "atr_pct"]])
+
+        if strategy_type == "reversion":
+            group["rsi2"] = compute_rsi(group, period=2)
+            group["drawdown_3d"] = (group["close"] / group["close"].shift(3)) - 1.0
+            all_rsi2.append(group[["date", "ticker_id", "rsi2"]])
+            all_drawdown_3d.append(group[["date", "ticker_id", "drawdown_3d"]])
 
     rvol_long = pd.concat(all_rvol, ignore_index=True)
     atr_long = pd.concat(all_atr_pct, ignore_index=True)
@@ -228,6 +295,15 @@ def _compute_wide_indicators(df: pd.DataFrame, id_to_symbol: dict) -> tuple:
     open_df = _pivot_column(df, "open", id_to_symbol)
     rvol_df = _pivot_column(df, "rvol", id_to_symbol)
     atr_pct_df = _pivot_column(df, "atr_pct", id_to_symbol)
+
+    if strategy_type == "reversion":
+        rsi2_long = pd.concat(all_rsi2, ignore_index=True)
+        drawdown_long = pd.concat(all_drawdown_3d, ignore_index=True)
+        df = df.merge(rsi2_long, on=["date", "ticker_id"], how="left")
+        df = df.merge(drawdown_long, on=["date", "ticker_id"], how="left")
+        rsi2_df = _pivot_column(df, "rsi2", id_to_symbol)
+        drawdown_3d_df = _pivot_column(df, "drawdown_3d", id_to_symbol)
+        return price_df, open_df, rvol_df, atr_pct_df, rsi2_df, drawdown_3d_df
 
     return price_df, open_df, rvol_df, atr_pct_df
 
@@ -293,9 +369,15 @@ def run_full_backtest(years_back: int = 2) -> list[dict]:
     return all_results
 
 
-def run_single_ticker_backtest(symbol: str, years_back: int = 2) -> dict | None:
+def run_single_ticker_backtest(
+    symbol: str,
+    years_back: int = 2,
+    strategy_type: str = "momentum",
+) -> dict | None:
     """
     Run the backtest for a single ticker. Used by the /api/backtest/{ticker} endpoint.
+
+    strategy_type: "momentum" (default) or "reversion"
     Returns a single result dict or None if insufficient data.
     """
     to_date = date.today()
@@ -315,8 +397,19 @@ def run_single_ticker_backtest(symbol: str, years_back: int = 2) -> dict | None:
         return None
 
     id_to_symbol = {tkr.id: tkr.symbol}
-    price_df, open_df, rvol_df, atr_pct_df = _compute_wide_indicators(raw_df, id_to_symbol)
-    del raw_df
 
-    results = _run_batch(price_df, open_df, rvol_df, atr_pct_df)
+    if strategy_type == "reversion":
+        price_df, open_df, rvol_df, atr_pct_df, rsi2_df, drawdown_3d_df = \
+            _compute_wide_indicators(raw_df, id_to_symbol, strategy_type="reversion")
+        del raw_df
+        results = _run_batch(
+            price_df, open_df, rvol_df, atr_pct_df,
+            strategy_type="reversion",
+            rsi2_df=rsi2_df, drawdown_3d_df=drawdown_3d_df,
+        )
+    else:
+        price_df, open_df, rvol_df, atr_pct_df = _compute_wide_indicators(raw_df, id_to_symbol)
+        del raw_df
+        results = _run_batch(price_df, open_df, rvol_df, atr_pct_df)
+
     return results[0] if results else None

@@ -170,13 +170,19 @@ async def reversion_today():
 
 
 @app.get("/api/backtest/{ticker}", response_model=BacktestResultResponse)
-async def backtest_ticker(ticker: str):
+async def backtest_ticker(ticker: str, strategy: str = "momentum"):
     """
     Run (or retrieve) the VectorBT backtest for a single ticker.
+
+    Query params:
+      - strategy: "momentum" (default) or "reversion"
+
     Returns win rate, profit factor, max drawdown, and the equity curve
     formatted for TradingView Lightweight Charts.
     """
     symbol = ticker.upper()
+    if strategy not in ("momentum", "reversion"):
+        raise HTTPException(status_code=400, detail="strategy must be 'momentum' or 'reversion'")
 
     # Verify the ticker exists
     db = SessionLocal()
@@ -194,7 +200,9 @@ async def backtest_ticker(ticker: str):
     from app.backtester import run_single_ticker_backtest
 
     # Run the backtest (CPU-bound, offload to thread)
-    result = await asyncio.to_thread(run_single_ticker_backtest, symbol)
+    result = await asyncio.to_thread(
+        run_single_ticker_backtest, symbol, strategy_type=strategy,
+    )
 
     if result is None:
         raise HTTPException(

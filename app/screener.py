@@ -284,11 +284,15 @@ async def run_daily_pipeline(screen_date: date | None = None) -> dict:
         all_symbols, from_date=screen_date, hold_days=7,
     )
 
-    # Step 2: Run the screener with cooldown + earnings exclusion
+    # Step 2: Run the momentum screener with cooldown + earnings exclusion
     result = run_screener(screen_date, earnings_blacklist=earnings_blacklist)
     signals = result["signals"]
 
-    # Step 3: Fetch news for all signals concurrently
+    # Step 2b: Run the mean-reversion screener
+    from app.mean_reversion import run_reversion_screener
+    reversion_result = run_reversion_screener(screen_date)
+
+    # Step 3: Fetch news for all momentum signals concurrently
     news_map: dict[str, list[dict]] = {}
     if signals:
         tasks = [fetch_news(s["symbol"], limit=3) for s in signals]
@@ -296,8 +300,8 @@ async def run_daily_pipeline(screen_date: date | None = None) -> dict:
         for sig, articles in zip(signals, news_results):
             news_map[sig["symbol"]] = articles
 
-    # Step 4: Send Telegram notification
-    await send_telegram_alert(result, news_map)
+    # Step 4: Send unified Telegram notification (momentum + reversion)
+    await send_telegram_alert(result, news_map, reversion_result=reversion_result)
 
     return result
 

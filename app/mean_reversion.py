@@ -22,7 +22,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
-from app.models import Ticker, DailyMarketData
+from app.models import Ticker, DailyMarketData, ReversionSignal
 from app.indicators import compute_rsi, compute_sma, compute_adv
 
 logger = logging.getLogger(__name__)
@@ -58,6 +58,40 @@ def _load_all_ohlcv(db: Session, ticker_ids: list[int], since: date) -> pd.DataF
         rows,
         columns=["ticker_id", "date", "open", "high", "low", "close", "volume"],
     )
+
+
+def _save_reversion_signals(db: Session, signals: list[dict]) -> None:
+    """Upsert reversion signals into Postgres."""
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+    if not signals:
+        return
+
+    values = [
+        {
+            "ticker_id": s["ticker_id"],
+            "date": s["date"],
+            "trigger_price": s["trigger_price"],
+            "rsi2_at_trigger": s["rsi2"],
+            "drawdown_3d_pct": s["drawdown_3d_pct"],
+            "sma_distance_pct": s["sma_distance_pct"],
+        }
+        for s in signals
+    ]
+
+    stmt = pg_insert(ReversionSignal).values(values)
+    stmt = stmt.on_conflict_do_update(
+        constraint="uq_reversion_signal_ticker_date",
+        set_={
+            "trigger_price": stmt.excluded.trigger_price,
+            "rsi2_at_trigger": stmt.excluded.rsi2_at_trigger,
+            "drawdown_3d_pct": stmt.excluded.drawdown_3d_pct,
+            "sma_distance_pct": stmt.excluded.sma_distance_pct,
+        },
+    )
+    db.execute(stmt)
+    db.commit()
+    logger.info("Saved %d reversion signals to Postgres", len(values))
 
 
 def run_reversion_screener(screen_date: date | None = None) -> dict:
@@ -99,8 +133,9 @@ def run_reversion_screener(screen_date: date | None = None) -> dict:
         all_ohlcv = _load_all_ohlcv(db, ticker_ids, lookback_start)
         logger.info("Loaded %d OHLCV rows for reversion screener", len(all_ohlcv))
 
-    finally:
+    except Exception:
         db.close()
+        raise
 
     if all_ohlcv.empty:
         return {"date": screen_date, "signals": []}
@@ -176,6 +211,12 @@ def run_reversion_screener(screen_date: date | None = None) -> dict:
 
     # Sort by RSI ascending (most oversold first)
     signals.sort(key=lambda s: s["rsi2"])
+
+    # Persist signals to Postgres
+    try:
+        _save_reversion_signals(db, signals)
+    finally:
+        db.close()
 
     gc.collect()
 
