@@ -12,6 +12,7 @@ Static files:
 
 import asyncio
 import logging
+import threading
 from contextlib import asynccontextmanager
 from datetime import date
 from pathlib import Path
@@ -31,10 +32,21 @@ from app.schemas import (
     SignalResponse,
 )
 from app.news_fetcher import fetch_news
-# NOTE: backtester import is LAZY to avoid vectorbt/plotly loading at boot
-# (prevents Heroku H20 boot timeout). Imported inside the endpoint handler.
 
 logger = logging.getLogger(__name__)
+
+# Pre-warm vectorbt import in a background thread so the app boots fast
+# (avoids H20 boot timeout) but the module is ready before first request.
+_vbt_ready = threading.Event()
+
+
+def _preload_vectorbt():
+    import app.backtester  # noqa: F401 – triggers vectorbt/plotly import
+    _vbt_ready.set()
+    logger.info("vectorbt pre-loaded in background thread.")
+
+
+threading.Thread(target=_preload_vectorbt, daemon=True).start()
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
@@ -149,7 +161,10 @@ async def backtest_ticker(ticker: str):
     finally:
         db.close()
 
-    # Lazy import to avoid vectorbt/plotly loading at boot time
+    # Wait for the background vectorbt pre-load to finish (max 120s)
+    if not _vbt_ready.wait(timeout=120):
+        raise HTTPException(status_code=503, detail="Backtester is still loading, try again shortly")
+
     from app.backtester import run_single_ticker_backtest
 
     # Run the backtest (CPU-bound, offload to thread)
