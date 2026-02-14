@@ -115,14 +115,17 @@ function switchView(view) {
     // Update panel title and show relevant content
     if (view === 'momentum') {
         panelTitle.textContent = 'Momentum Triggers';
+        restoreBacktestChartMode();
         renderMomentumSignals();
     } else if (view === 'reversion') {
         panelTitle.textContent = 'Oversold Reversions';
+        restoreBacktestChartMode();
         renderReversionSignals();
     } else if (view === 'performance') {
         panelTitle.textContent = 'Paper Trading';
         perfPanel.classList.remove('hidden');
         fetchPerformanceData();
+        showEquityCurveChart();
     }
 }
 
@@ -408,7 +411,8 @@ async function loadBacktest(ticker, strategy = 'momentum') {
         const retEl = document.getElementById('total-return').parentElement;
         retEl.style.color = data.total_return_pct >= 0 ? '#3fb950' : '#f85149';
 
-        // Render equity curve
+        // Render equity curve with blue line for backtest
+        equitySeries.applyOptions({ color: '#2962FF' });
         equitySeries.setData(data.equity_curve);
         chart.timeScale().fitContent();
 
@@ -506,6 +510,90 @@ function renderTradeLog(trades) {
         `;
         tradeLogBody.appendChild(tr);
     });
+}
+
+// ---- Equity Curve Chart (Performance Tab) ----
+
+async function showEquityCurveChart() {
+    activeTicker.textContent = 'Paper Portfolio Equity Curve';
+    chartPlaceholder.classList.add('hidden');
+    loadingOverlay.classList.remove('hidden');
+
+    // Lazy-init the chart on first use
+    if (!chart) {
+        initChart();
+    }
+
+    try {
+        const [curveResp, metricsResp] = await Promise.all([
+            fetch('/api/paper/equity-curve'),
+            fetch('/api/paper/metrics'),
+        ]);
+        const curveData = await curveResp.json();
+        const metrics = await metricsResp.json();
+
+        // Update metric card labels for paper trading mode
+        document.getElementById('label-win-rate').textContent = 'Win Rate';
+        document.getElementById('label-profit-factor').textContent = 'Profit Factor';
+        document.getElementById('label-max-drawdown').textContent = 'Best Trade';
+        document.getElementById('label-total-trades').textContent = 'Closed Trades';
+        document.getElementById('label-total-return').textContent = 'Total PnL';
+        document.getElementById('label-avg-pos-size').textContent = 'Avg Hold';
+
+        // Update metric card values
+        document.getElementById('win-rate-wrap').innerHTML = `<span id="win-rate">${metrics.win_rate.toFixed(1)}</span>%`;
+        document.getElementById('profit-factor').textContent = metrics.profit_factor.toFixed(2);
+        document.getElementById('max-drawdown-wrap').innerHTML = `<span id="max-drawdown">${metrics.best_trade_pct.toFixed(1)}</span>%`;
+        document.getElementById('total-trades').textContent = metrics.closed_trades;
+        const pnlSign = metrics.total_pnl >= 0 ? '+' : '';
+        document.getElementById('total-return-wrap').innerHTML = `${pnlSign}$${metrics.total_pnl.toFixed(2)}`;
+        document.getElementById('total-return-wrap').style.color = metrics.total_pnl >= 0 ? '#3fb950' : '#f85149';
+        document.getElementById('avg-pos-size-wrap').innerHTML = `${metrics.avg_hold_days.toFixed(1)}d`;
+
+        // Render equity curve
+        if (curveData.equity_curve && curveData.equity_curve.length > 0) {
+            const lineColor = metrics.total_pnl >= 0 ? '#3fb950' : '#f85149';
+            equitySeries.applyOptions({ color: lineColor });
+            equitySeries.setData(curveData.equity_curve);
+            chart.timeScale().fitContent();
+        } else {
+            equitySeries.setData([]);
+            chartPlaceholder.classList.remove('hidden');
+        }
+
+    } catch (err) {
+        console.error('Error loading equity curve:', err);
+    } finally {
+        loadingOverlay.classList.add('hidden');
+    }
+}
+
+function restoreBacktestChartMode() {
+    // Reset metric card labels to backtest defaults
+    document.getElementById('label-win-rate').textContent = 'Win Rate';
+    document.getElementById('label-profit-factor').textContent = 'Profit Factor';
+    document.getElementById('label-max-drawdown').textContent = 'Max Drawdown';
+    document.getElementById('label-total-trades').textContent = 'Total Trades';
+    document.getElementById('label-total-return').textContent = 'Total Return';
+    document.getElementById('label-avg-pos-size').textContent = 'Avg Size';
+
+    // Reset metric card values and suffixes
+    document.getElementById('win-rate-wrap').innerHTML = '<span id="win-rate">--</span>%';
+    document.getElementById('profit-factor').textContent = '--';
+    document.getElementById('max-drawdown-wrap').innerHTML = '<span id="max-drawdown">--</span>%';
+    document.getElementById('total-trades').textContent = '--';
+    document.getElementById('total-return-wrap').innerHTML = '<span id="total-return">--</span>%';
+    document.getElementById('total-return-wrap').style.color = '';
+    document.getElementById('avg-pos-size-wrap').innerHTML = '<span id="avg-pos-size">--</span>%';
+
+    // Reset line color to accent blue
+    if (equitySeries) {
+        equitySeries.applyOptions({ color: '#2962FF' });
+    }
+
+    // Reset header
+    activeTicker.textContent = 'Select a Ticker';
+    chartPlaceholder.classList.remove('hidden');
 }
 
 // ---- Init ----

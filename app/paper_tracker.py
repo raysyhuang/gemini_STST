@@ -15,13 +15,14 @@ Constants match the backtester exactly.
 """
 
 import logging
+from collections import defaultdict
 from datetime import date, timedelta
 
 import numpy as np
-from sqlalchemy import func
+from sqlalchemy import func, distinct, asc
 from sqlalchemy.orm import Session
 
-from app.models import PaperTrade, DailyMarketData, Ticker
+from app.models import PaperTrade, DailyMarketData, Ticker, ScreenerSignal, ReversionSignal
 from app.indicators import compute_atr_pct
 
 logger = logging.getLogger(__name__)
@@ -496,3 +497,175 @@ def get_paper_trades(db: Session, status: str | None = None) -> list[dict]:
         })
 
     return result
+
+
+# ── 6. Backfill Paper Trades ────────────────────────────────────
+
+def backfill_paper_trades(db: Session) -> dict:
+    """
+    Backfill paper trades from historical screener_signals and reversion_signals.
+
+    Replays the full trade lifecycle day-by-day: fill → check → create,
+    matching the live pipeline ordering so trades created on day N stay
+    pending until day N+1.
+
+    Returns a summary dict matching BackfillResponse schema.
+    """
+    # 1. Clear existing paper trades
+    db.query(PaperTrade).delete()
+    db.commit()
+    logger.info("Cleared existing paper trades for backfill.")
+
+    # 2. Load all signals from both tables
+    momentum_rows = db.query(ScreenerSignal).order_by(ScreenerSignal.date).all()
+    reversion_rows = db.query(ReversionSignal).order_by(ReversionSignal.date).all()
+
+    if not momentum_rows and not reversion_rows:
+        return {
+            "total_created": 0,
+            "total_filled": 0,
+            "total_closed": 0,
+            "date_range": "N/A",
+            "trading_days_processed": 0,
+        }
+
+    # 3. Build date-indexed signal map
+    signal_dates = defaultdict(lambda: {"momentum": [], "reversion": []})
+
+    for row in momentum_rows:
+        signal_dates[row.date]["momentum"].append({
+            "ticker_id": row.ticker_id,
+            "date": row.date,
+            "atr_pct_at_trigger": row.atr_pct_at_trigger,
+            "quality_score": row.quality_score,
+        })
+
+    for row in reversion_rows:
+        signal_dates[row.date]["reversion"].append({
+            "ticker_id": row.ticker_id,
+            "date": row.date,
+            "atr_pct_at_trigger": 10.0,  # reversion_signals doesn't store atr_pct
+            "quality_score": row.quality_score,
+        })
+
+    # 4. Get all trading dates from DB (min signal date to max + 30 days buffer)
+    all_signal_dates = list(signal_dates.keys())
+    min_date = min(all_signal_dates)
+    max_date = max(all_signal_dates) + timedelta(days=45)  # calendar buffer for 30 trading days
+
+    trading_dates = [
+        row[0] for row in db.query(distinct(DailyMarketData.date))
+        .filter(DailyMarketData.date >= min_date, DailyMarketData.date <= max_date)
+        .order_by(asc(DailyMarketData.date))
+        .all()
+    ]
+
+    if not trading_dates:
+        return {
+            "total_created": 0,
+            "total_filled": 0,
+            "total_closed": 0,
+            "date_range": f"{min_date} to {max_date}",
+            "trading_days_processed": 0,
+        }
+
+    # 5. Iterate each trading date IN ORDER: fill → check → create
+    total_created = 0
+    total_filled = 0
+    total_closed = 0
+
+    for i, current_date in enumerate(trading_dates):
+        # Progress logging every 50 dates
+        if i > 0 and i % 50 == 0:
+            logger.info(
+                "Backfill progress: %d/%d trading days (created=%d, filled=%d, closed=%d)",
+                i, len(trading_dates), total_created, total_filled, total_closed,
+            )
+
+        # Fill yesterday's pending → open
+        total_filled += fill_pending_trades(db)
+
+        # Check open trades for stops/time exits
+        total_closed += check_open_trades(db, current_date)
+
+        # Create new pending trades if signals exist for this date
+        if current_date in signal_dates:
+            signals = signal_dates[current_date]
+            if signals["momentum"]:
+                total_created += create_pending_trades(db, signals["momentum"], "momentum")
+            if signals["reversion"]:
+                total_created += create_pending_trades(db, signals["reversion"], "reversion")
+
+    # Final pass: fill and close any remaining trades
+    total_filled += fill_pending_trades(db)
+    if trading_dates:
+        total_closed += check_open_trades(db, trading_dates[-1])
+
+    logger.info(
+        "Backfill complete: created=%d, filled=%d, closed=%d over %d trading days",
+        total_created, total_filled, total_closed, len(trading_dates),
+    )
+
+    actual_min = trading_dates[0] if trading_dates else min_date
+    actual_max = trading_dates[-1] if trading_dates else max_date
+
+    return {
+        "total_created": total_created,
+        "total_filled": total_filled,
+        "total_closed": total_closed,
+        "date_range": f"{actual_min} to {actual_max}",
+        "trading_days_processed": len(trading_dates),
+    }
+
+
+# ── 7. Get Equity Curve ────────────────────────────────────────
+
+def get_equity_curve(db: Session) -> list[dict]:
+    """
+    Compute cumulative equity curve from closed paper trades.
+
+    Returns a list of {time: "YYYY-MM-DD", value: float} dicts matching
+    the TradingView Lightweight Charts format used by the backtester.
+    """
+    closed_trades = (
+        db.query(PaperTrade)
+        .filter(PaperTrade.status == "closed", PaperTrade.actual_exit_date.isnot(None))
+        .order_by(PaperTrade.actual_exit_date.asc())
+        .all()
+    )
+
+    if not closed_trades:
+        return []
+
+    # Group PnL by exit date
+    daily_pnl = defaultdict(float)
+    for t in closed_trades:
+        daily_pnl[t.actual_exit_date] += (t.pnl_dollars or 0)
+
+    # Build cumulative equity curve starting from ACCOUNT_SIZE
+    sorted_dates = sorted(daily_pnl.keys())
+    cumulative = ACCOUNT_SIZE
+    curve = []
+
+    for d in sorted_dates:
+        cumulative += daily_pnl[d]
+        curve.append({
+            "time": d.isoformat(),
+            "value": round(cumulative, 2),
+        })
+
+    return curve
+
+
+# ── CLI Entry Point ─────────────────────────────────────────────
+
+if __name__ == "__main__":
+    from app.database import SessionLocal as _SessionLocal
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+
+    db = _SessionLocal()
+    try:
+        result = backfill_paper_trades(db)
+        print(result)
+    finally:
+        db.close()

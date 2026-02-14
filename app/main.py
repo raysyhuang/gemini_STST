@@ -25,7 +25,9 @@ from fastapi.staticfiles import StaticFiles
 from app.database import init_db, SessionLocal
 from app.models import Ticker, ScreenerSignal
 from app.schemas import (
+    BackfillResponse,
     BacktestResultResponse,
+    EquityCurveResponse,
     MarketRegimeResponse,
     NewsArticle,
     PaperMetricsResponse,
@@ -292,6 +294,35 @@ async def paper_trades(status: str = Query(default="all")):
         total=len(trades),
         trades=[PaperTradeResponse(**t) for t in trades],
     )
+
+
+@app.post("/api/paper/backfill", response_model=BackfillResponse)
+async def paper_backfill():
+    """
+    Backfill paper trades from historical screener/reversion signals.
+    WARNING: This clears all existing paper trades before backfilling.
+    """
+    from app.paper_tracker import backfill_paper_trades
+
+    db = SessionLocal()
+    try:
+        result = await asyncio.to_thread(backfill_paper_trades, db)
+    finally:
+        db.close()
+    return BackfillResponse(**result)
+
+
+@app.get("/api/paper/equity-curve", response_model=EquityCurveResponse)
+async def paper_equity_curve():
+    """Return the cumulative equity curve from closed paper trades."""
+    from app.paper_tracker import get_equity_curve
+
+    db = SessionLocal()
+    try:
+        curve = get_equity_curve(db)
+    finally:
+        db.close()
+    return EquityCurveResponse(equity_curve=curve)
 
 
 # ------------------------------------------------------------------

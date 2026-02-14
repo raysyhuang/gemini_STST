@@ -124,3 +124,15 @@ class PaperMetricsResponse(BaseModel):
 class PaperTradesListResponse(BaseModel):
     total: int
     trades: list[PaperTradeResponse]
+
+
+class BackfillResponse(BaseModel):
+    total_created: int
+    total_filled: int
+    total_closed: int
+    date_range: str
+    trading_days_processed: int
+
+
+class EquityCurveResponse(BaseModel):
+    equity_curve: list[dict[str, Any]]
