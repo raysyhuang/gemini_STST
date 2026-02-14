@@ -19,6 +19,11 @@ __pycache__/
 .vscode/
 .idea/
 
+# Agent skills
+.agents/
+.continue/
+.trae/
+
 # OS & misc
 .DS_Store
 *.png
