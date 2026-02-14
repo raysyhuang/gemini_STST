@@ -17,8 +17,8 @@ numpy==1.26.4
 # Backtesting Engine (Phase 2)
 vectorbt==0.26.2
 
-# Technical Indicators (Phase 2)
-TA-Lib==0.4.28
+# SSL certificates
+certifi
 
 # Environment
 python-dotenv==1.0.1
