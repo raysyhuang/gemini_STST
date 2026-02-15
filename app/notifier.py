@@ -100,8 +100,8 @@ def _build_message(
             # Mark signals that won't be traded
             will_trade = (quality or 0) >= MOMENTUM_QUALITY_FLOOR and not skip_mom
             badge = "\u2B50 " if confluence else ""
-            dim = "" if will_trade else "~"
-            lines.append(f"{badge}{dim}*{sym_esc}* — ${_escape_md(str(price))}{dim}")
+            skip_icon = "" if will_trade else "\U0001f6ab "
+            lines.append(f"{badge}{skip_icon}*{sym_esc}* — ${_escape_md(str(price))}")
 
             rsi_14 = sig.get("rsi_14")
             pct_52w = sig.get("pct_from_52w_high")
