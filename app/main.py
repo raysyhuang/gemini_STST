@@ -84,6 +84,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# -- Register engine endpoint for cross-engine integration --
+from app.engine_endpoint import router as engine_router
+app.include_router(engine_router)
+
 # -- Static files --
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 

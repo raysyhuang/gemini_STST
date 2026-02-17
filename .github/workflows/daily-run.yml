@@ -1,0 +1,50 @@
+name: Daily Screening Run
+
+on:
+  schedule:
+    # Weekdays at 22:45 UTC / 5:45 PM ET (after market close)
+    # Runs after slower engines start; fast trigger (~5 min), done well before 9:30 PM ET collection
+    - cron: "45 22 * * 1-5"
+  workflow_dispatch:
+
+env:
+  PYTHON_VERSION: "3.12"
+
+concurrency:
+  group: daily-run
+  cancel-in-progress: true
+
+jobs:
+  run:
+    name: Trigger daily pipeline
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Trigger pipeline on Heroku
+        env:
+          GEMINI_HEROKU_URL: ${{ secrets.GEMINI_HEROKU_URL }}
+          ENGINE_API_KEY: ${{ secrets.ENGINE_API_KEY }}
+        run: |
+          if [ -z "${GEMINI_HEROKU_URL}" ]; then
+            echo "Error: GEMINI_HEROKU_URL not set"
+            exit 1
+          fi
+
+          echo "Triggering pipeline run on Heroku..."
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+            "${GEMINI_HEROKU_URL}/api/pipeline/run" \
+            -H "Content-Type: application/json" \
+            -H "X-Engine-Key: ${ENGINE_API_KEY}" \
+            --max-time 300)
+
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          BODY=$(echo "$RESPONSE" | head -n -1)
+
+          echo "Response (HTTP ${HTTP_CODE}): ${BODY}"
+
+          if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
+            echo "Pipeline triggered successfully"
+          else
+            echo "Pipeline trigger failed with HTTP ${HTTP_CODE}"
+            exit 1
+          fi
