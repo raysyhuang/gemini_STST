@@ -41,40 +41,75 @@ _ssl_ctx = ssl.create_default_context(cafile=certifi.where())
 # 1. Fetch all active NYSE / NASDAQ tickers
 # ---------------------------------------------------------------------------
 
-async def fetch_all_tickers(session: aiohttp.ClientSession) -> list[dict]:
-    """
-    Paginate through Polygon's /v3/reference/tickers endpoint to retrieve
-    every active stock on NYSE and NASDAQ.
-    """
+# MIC code → exchange short name
+# XNGS = NASDAQ Global Select (AAPL, MSFT, NVDA, GOOGL, META, TSLA, etc.)
+# XNCM = NASDAQ Capital Market, XNMS = NASDAQ Global Market
+_EXCHANGE_MAP: dict[str, str] = {
+    "XNYS": "NYSE", "XNAS": "NASDAQ", "XASE": "AMEX",
+    "ARCX": "NYSE", "BATS": "NASDAQ",
+    "XNGS": "NASDAQ", "XNCM": "NASDAQ", "XNMS": "NASDAQ",
+}
+
+# Alphabet ranges to stay under Starter plan's ~1000 result cap per query
+_TICKER_RANGES: list[tuple[str, str | None]] = [
+    ("A", "D"), ("D", "G"), ("G", "J"), ("J", "M"),
+    ("M", "P"), ("P", "S"), ("S", "V"), ("V", None),
+]
+
+
+async def _fetch_ticker_range(
+    session: aiohttp.ClientSession,
+    ticker_gte: str,
+    ticker_lt: str | None,
+) -> list[dict]:
+    """Fetch one alphabetical slice of reference tickers."""
     tickers: list[dict] = []
     url = (
         f"{POLYGON_BASE}/v3/reference/tickers"
         f"?type=CS&market=stocks&active=true&limit=1000"
+        f"&ticker.gte={ticker_gte}"
         f"&apiKey={POLYGON_API_KEY}"
     )
+    if ticker_lt:
+        url += f"&ticker.lt={ticker_lt}"
 
     while url:
         async with session.get(url) as resp:
             if resp.status != 200:
-                logger.error("Ticker fetch failed: %s", await resp.text())
+                logger.error("Ticker fetch failed (%s–%s): %s",
+                             ticker_gte, ticker_lt, await resp.text())
                 break
             data = await resp.json()
 
         for t in data.get("results", []):
-            exchange = t.get("primary_exchange", "")
-            # Keep only NYSE (XNYS) and NASDAQ (XNAS) common stocks
-            if exchange in ("XNYS", "XNAS"):
+            exchange_short = _EXCHANGE_MAP.get(t.get("primary_exchange", ""))
+            if exchange_short in ("NYSE", "NASDAQ"):
                 tickers.append({
                     "symbol": t["ticker"],
-                    "exchange": "NYSE" if exchange == "XNYS" else "NASDAQ",
+                    "exchange": exchange_short,
                     "company_name": t.get("name", ""),
                 })
 
-        # Polygon returns next_url for pagination
         url = data.get("next_url")
         if url:
             url = f"{url}&apiKey={POLYGON_API_KEY}"
 
+    return tickers
+
+
+async def fetch_all_tickers(session: aiohttp.ClientSession) -> list[dict]:
+    """
+    Paginate through Polygon's /v3/reference/tickers endpoint to retrieve
+    every active stock on NYSE and NASDAQ.
+
+    Queries 8 parallel alphabetical ranges so each stays under the Starter
+    plan's ~1,000 result cap, giving full A–Z coverage.
+    """
+    chunks = await asyncio.gather(*(
+        _fetch_ticker_range(session, gte, lt)
+        for gte, lt in _TICKER_RANGES
+    ))
+    tickers = [t for chunk in chunks for t in chunk]
     logger.info("Fetched %d NYSE/NASDAQ tickers from Polygon", len(tickers))
     return tickers
 
