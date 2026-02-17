@@ -165,22 +165,18 @@ async def trigger_pipeline(
 
     try:
         from app.screener import run_screener
-        from app.mean_reversion import run_mean_reversion_screener
+        from app.mean_reversion import run_reversion_screener
 
-        db = SessionLocal()
-        try:
-            # Run both screeners
-            momentum_count = run_screener(db)
-            reversion_count = run_mean_reversion_screener(db)
+        # Run both screeners (they manage their own DB sessions)
+        momentum_result = run_screener()
+        reversion_result = run_reversion_screener()
 
-            return {
-                "status": "success",
-                "momentum_signals": momentum_count,
-                "reversion_signals": reversion_count,
-                "date": str(date.today()),
-            }
-        finally:
-            db.close()
+        return {
+            "status": "success",
+            "momentum_signals": momentum_result,
+            "reversion_signals": reversion_result,
+            "date": str(date.today()),
+        }
 
     except Exception as e:
         logger.error("Pipeline run failed: %s", e, exc_info=True)
