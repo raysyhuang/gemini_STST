@@ -42,8 +42,8 @@ jobs:
 
           echo "Response (HTTP ${HTTP_CODE}): ${BODY}"
 
-          if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
-            echo "Pipeline triggered successfully"
+          if [ "$HTTP_CODE" = "202" ] || [ "$HTTP_CODE" = "200" ]; then
+            echo "Pipeline trigger accepted (HTTP ${HTTP_CODE})"
           else
             echo "Pipeline trigger failed with HTTP ${HTTP_CODE}"
             exit 1

@@ -11,8 +11,10 @@ from __future__ import annotations
 import logging
 import os
 from datetime import date, datetime
+from threading import Lock
+from uuid import uuid4
 
-from fastapi import APIRouter, HTTPException, Header
+from fastapi import APIRouter, HTTPException, Header, BackgroundTasks
 from pydantic import BaseModel
 from typing import Optional
 
@@ -22,6 +24,14 @@ from app.models import Ticker, ScreenerSignal, ReversionSignal
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["engine"])
+_pipeline_state_lock = Lock()
+_pipeline_state: dict = {
+    "status": "idle",  # idle | running | succeeded | failed
+    "run_id": None,
+    "started_at": None,
+    "finished_at": None,
+    "error": None,
+}
 
 
 class EnginePick(BaseModel):
@@ -48,6 +58,35 @@ class EngineResultPayload(BaseModel):
     candidates_screened: int
     pipeline_duration_s: float | None = None
     status: str = "success"
+
+
+def _run_pipeline_job(run_id: str) -> None:
+    """Execute the daily screeners outside the request lifecycle."""
+    with _pipeline_state_lock:
+        _pipeline_state["status"] = "running"
+        _pipeline_state["run_id"] = run_id
+        _pipeline_state["started_at"] = datetime.utcnow().isoformat()
+        _pipeline_state["finished_at"] = None
+        _pipeline_state["error"] = None
+
+    try:
+        from app.screener import run_screener
+        from app.mean_reversion import run_reversion_screener
+
+        run_screener()
+        run_reversion_screener()
+
+        with _pipeline_state_lock:
+            _pipeline_state["status"] = "succeeded"
+            _pipeline_state["finished_at"] = datetime.utcnow().isoformat()
+            _pipeline_state["error"] = None
+        logger.info("Pipeline job %s completed successfully", run_id)
+    except Exception as e:
+        with _pipeline_state_lock:
+            _pipeline_state["status"] = "failed"
+            _pipeline_state["finished_at"] = datetime.utcnow().isoformat()
+            _pipeline_state["error"] = str(e)
+        logger.error("Pipeline job %s failed: %s", run_id, e, exc_info=True)
 
 
 def _get_regime_label(db) -> str:
@@ -151,8 +190,9 @@ async def get_engine_results():
         db.close()
 
 
-@router.post("/api/pipeline/run")
+@router.post("/api/pipeline/run", status_code=202)
 async def trigger_pipeline(
+    background_tasks: BackgroundTasks,
     x_engine_key: Optional[str] = Header(None),
 ):
     """Trigger the full screening pipeline (authenticated).
@@ -163,21 +203,28 @@ async def trigger_pipeline(
     if expected_key and x_engine_key != expected_key:
         raise HTTPException(403, "Invalid API key")
 
-    try:
-        from app.screener import run_screener
-        from app.mean_reversion import run_reversion_screener
+    with _pipeline_state_lock:
+        if _pipeline_state["status"] == "running":
+            return {
+                "status": "accepted",
+                "message": "Pipeline already running",
+                "run_id": _pipeline_state["run_id"],
+                "date": str(date.today()),
+            }
 
-        # Run both screeners (they manage their own DB sessions)
-        momentum_result = run_screener()
-        reversion_result = run_reversion_screener()
+    run_id = f"gem-{uuid4().hex[:8]}"
+    background_tasks.add_task(_run_pipeline_job, run_id)
+    logger.info("Accepted pipeline run request: %s", run_id)
+    return {
+        "status": "accepted",
+        "message": "Pipeline scheduled",
+        "run_id": run_id,
+        "date": str(date.today()),
+    }
 
-        return {
-            "status": "success",
-            "momentum_signals": momentum_result,
-            "reversion_signals": reversion_result,
-            "date": str(date.today()),
-        }
 
-    except Exception as e:
-        logger.error("Pipeline run failed: %s", e, exc_info=True)
-        raise HTTPException(500, f"Pipeline failed: {e}")
+@router.get("/api/pipeline/status")
+async def pipeline_status():
+    """Return last known pipeline execution state."""
+    with _pipeline_state_lock:
+        return dict(_pipeline_state)
