@@ -143,6 +143,7 @@ jobs:
 
           picks = payload.get("picks") or []
           missing_risk = []
+          missing_scores = []
           for p in picks:
               ticker = p.get("ticker", "?")
               entry = float(p.get("entry_price") or 0)
@@ -150,9 +151,14 @@ jobs:
               target = float(p.get("target_price") or 0)
               if entry <= 0 or stop <= 0 or target <= 0:
                   missing_risk.append(ticker)
+              scores = ((p.get("metadata") or {}).get("scores") or {})
+              if not scores:
+                  missing_scores.append(ticker)
 
           if missing_risk:
               raise SystemExit(f"Picks missing valid risk fields: {missing_risk[:5]}")
+          if missing_scores:
+              raise SystemExit(f"Picks missing metadata.scores: {missing_scores[:5]}")
 
           print(
               "Engine results verified: "

@@ -38,6 +38,24 @@ _pipeline_state: dict = {
 _MOMENTUM_STOP_MULT = 3.5
 
 
+def _build_scores_metadata(
+    *,
+    quality_score: float | None,
+    confluence: bool | None,
+    strategy: str,
+) -> dict:
+    """Build normalized score metadata for cross-engine quality checks."""
+    scores: dict[str, float] = {}
+    if quality_score is not None:
+        scores["quality_score"] = float(quality_score)
+    if confluence is not None:
+        scores["confluence_bonus"] = 1.0 if bool(confluence) else 0.0
+    if not scores:
+        scores["quality_score"] = 50.0
+    scores["strategy"] = 1.0 if strategy else 0.0
+    return scores
+
+
 def _compute_momentum_risk_params(
     entry_price: float | None,
     atr_pct: float | None,
@@ -178,6 +196,11 @@ async def get_engine_results():
                     "rsi_14": signal.rsi_14,
                     "options_sentiment": signal.options_sentiment,
                     "confluence": signal.confluence,
+                    "scores": _build_scores_metadata(
+                        quality_score=signal.quality_score,
+                        confluence=signal.confluence,
+                        strategy="momentum",
+                    ),
                     "stop_method": "chandelier_proxy",
                 },
             ))
@@ -212,6 +235,11 @@ async def get_engine_results():
                     "sma_distance_pct": signal.sma_distance_pct,
                     "options_sentiment": signal.options_sentiment,
                     "confluence": signal.confluence,
+                    "scores": _build_scores_metadata(
+                        quality_score=signal.quality_score,
+                        confluence=signal.confluence,
+                        strategy="mean_reversion",
+                    ),
                 },
             ))
 
