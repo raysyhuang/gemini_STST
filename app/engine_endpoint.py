@@ -9,6 +9,7 @@ Also provides /api/pipeline/run POST for authenticated daily trigger.
 from __future__ import annotations
 
 import logging
+import math
 import os
 from datetime import date, datetime
 from threading import Lock
@@ -33,6 +34,27 @@ _pipeline_state: dict = {
     "finished_at": None,
     "error": None,
 }
+
+_MOMENTUM_STOP_MULT = 3.5
+
+
+def _compute_momentum_proxy_stop(entry_price: float | None, atr_pct: float | None) -> float | None:
+    """Compute a fixed stop proxy for momentum picks using the trailing-stop model.
+
+    Cross-engine consumers require explicit stop prices. Gemini STST manages
+    momentum risk with a Chandelier trailing stop, so we publish a conservative
+    initial fixed-stop proxy derived from ATR%.
+    """
+    if not entry_price or entry_price <= 0:
+        return None
+
+    if atr_pct and atr_pct > 0:
+        trail_frac = _MOMENTUM_STOP_MULT * atr_pct / (math.sqrt(5) * 100.0)
+        trail_frac = max(0.04, min(0.20, trail_frac))
+    else:
+        trail_frac = 0.10
+
+    return round(entry_price * (1 - trail_frac), 2)
 
 
 class EnginePick(BaseModel):
@@ -128,7 +150,10 @@ async def get_engine_results():
                 ticker=ticker.symbol,
                 strategy="momentum",
                 entry_price=signal.trigger_price or 0,
-                stop_loss=None,  # Gemini STST uses trailing stop, not fixed
+                stop_loss=_compute_momentum_proxy_stop(
+                    signal.trigger_price,
+                    signal.atr_pct_at_trigger,
+                ),
                 target_price=round(signal.trigger_price * 1.10, 2) if signal.trigger_price else None,
                 confidence=confidence,
                 holding_period_days=10,  # Tuned momentum hold
@@ -143,6 +168,7 @@ async def get_engine_results():
                     "rsi_14": signal.rsi_14,
                     "options_sentiment": signal.options_sentiment,
                     "confluence": signal.confluence,
+                    "stop_method": "chandelier_proxy",
                 },
             ))
 
