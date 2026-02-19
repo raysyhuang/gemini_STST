@@ -17,6 +17,7 @@ from uuid import uuid4
 from fastapi import APIRouter, HTTPException, Header, BackgroundTasks
 from pydantic import BaseModel
 from typing import Optional
+from sqlalchemy import func
 
 from app.database import SessionLocal
 from app.models import Ticker, ScreenerSignal, ReversionSignal
@@ -104,14 +105,19 @@ async def get_engine_results():
     """Return today's screening results in standardized format."""
     db = SessionLocal()
     try:
-        today = date.today()
+        # Use the latest available signal date rather than server-local "today"
+        # to avoid timezone/day-boundary mismatches returning empty payloads.
+        latest_momentum_date = db.query(func.max(ScreenerSignal.date)).scalar()
+        latest_reversion_date = db.query(func.max(ReversionSignal.date)).scalar()
+        latest_dates = [d for d in (latest_momentum_date, latest_reversion_date) if d is not None]
+        asof_date = max(latest_dates) if latest_dates else date.today()
         picks: list[dict] = []
 
         # Momentum signals
         momentum_query = (
             db.query(ScreenerSignal, Ticker)
             .join(Ticker, ScreenerSignal.ticker_id == Ticker.id)
-            .filter(ScreenerSignal.date == today)
+            .filter(ScreenerSignal.date == asof_date)
             .order_by(ScreenerSignal.quality_score.desc().nullslast())
             .all()
         )
@@ -144,7 +150,7 @@ async def get_engine_results():
         reversion_query = (
             db.query(ReversionSignal, Ticker)
             .join(Ticker, ReversionSignal.ticker_id == Ticker.id)
-            .filter(ReversionSignal.date == today)
+            .filter(ReversionSignal.date == asof_date)
             .order_by(ReversionSignal.quality_score.desc().nullslast())
             .all()
         )
@@ -179,7 +185,7 @@ async def get_engine_results():
         return EngineResultPayload(
             engine_name="gemini_stst",
             engine_version="7.0",
-            run_date=str(today),
+            run_date=str(asof_date),
             run_timestamp=datetime.utcnow().isoformat(),
             regime=regime,
             picks=picks,
