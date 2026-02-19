@@ -52,9 +52,15 @@ _EXCHANGE_MAP: dict[str, str] = {
 
 # Alphabet ranges to stay under Starter plan's ~1000 result cap per query
 _TICKER_RANGES: list[tuple[str, str | None]] = [
+    ("0", "A"),
     ("A", "D"), ("D", "G"), ("G", "J"), ("J", "M"),
     ("M", "P"), ("P", "S"), ("S", "V"), ("V", None),
 ]
+
+# Safety guard against accidental mass-deactivation when provider returns a
+# partial universe (rate limits, outages, transient API failures).
+MIN_SYMBOLS_FOR_SAFE_DEACTIVATE = 3000
+MIN_PREV_ACTIVE_RATIO_FOR_DEACTIVATE = 0.60
 
 
 async def _fetch_ticker_range(
@@ -110,14 +116,34 @@ async def fetch_all_tickers(session: aiohttp.ClientSession) -> list[dict]:
         for gte, lt in _TICKER_RANGES
     ))
     tickers = [t for chunk in chunks for t in chunk]
-    logger.info("Fetched %d NYSE/NASDAQ tickers from Polygon", len(tickers))
-    return tickers
+
+    # De-duplicate symbols across range boundaries / provider anomalies.
+    deduped: list[dict] = []
+    seen: set[str] = set()
+    dupes = 0
+    for t in tickers:
+        sym = t.get("symbol")
+        if not sym:
+            continue
+        if sym in seen:
+            dupes += 1
+            continue
+        seen.add(sym)
+        deduped.append(t)
+
+    logger.info(
+        "Fetched %d NYSE/NASDAQ tickers from Polygon (%d duplicates removed)",
+        len(deduped), dupes,
+    )
+    return deduped
 
 
 def upsert_tickers(db: Session, tickers: list[dict]) -> None:
     """Bulk upsert tickers into Postgres, skipping duplicates."""
     if not tickers:
         return
+
+    symbols = sorted({t["symbol"] for t in tickers if t.get("symbol")})
 
     stmt = pg_insert(Ticker).values(tickers)
     stmt = stmt.on_conflict_do_update(
@@ -129,6 +155,34 @@ def upsert_tickers(db: Session, tickers: list[dict]) -> None:
         },
     )
     db.execute(stmt)
+
+    # Mark symbols no longer present in Polygon active universe as inactive.
+    # To avoid accidental universe corruption, only deactivate when the new
+    # universe appears sufficiently complete.
+    if symbols:
+        prev_active_count = db.query(Ticker).filter(Ticker.is_active.is_(True)).count()
+        required_min = max(
+            MIN_SYMBOLS_FOR_SAFE_DEACTIVATE,
+            int(prev_active_count * MIN_PREV_ACTIVE_RATIO_FOR_DEACTIVATE),
+        ) if prev_active_count else MIN_SYMBOLS_FOR_SAFE_DEACTIVATE
+
+        if len(symbols) < required_min:
+            logger.warning(
+                "Skipping ticker deactivation due to possibly partial universe "
+                "(fetched=%d, required_min=%d, prev_active=%d)",
+                len(symbols),
+                required_min,
+                prev_active_count,
+            )
+        else:
+            db.query(Ticker).filter(
+                Ticker.is_active.is_(True),
+                ~Ticker.symbol.in_(symbols),
+            ).update(
+                {"is_active": False},
+                synchronize_session=False,
+            )
+
     db.commit()
     logger.info("Upserted %d tickers into Postgres", len(tickers))
 
