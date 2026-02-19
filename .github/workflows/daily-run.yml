@@ -18,7 +18,7 @@ jobs:
   run:
     name: Trigger daily pipeline
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - name: Trigger pipeline on Heroku
         env:
@@ -62,3 +62,100 @@ jobs:
             echo "Pipeline trigger failed after ${ATTEMPTS} attempts"
             exit 1
           fi
+
+      - name: Wait for pipeline to settle
+        env:
+          GEMINI_HEROKU_URL: ${{ secrets.GEMINI_HEROKU_URL }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import time
+          from urllib.request import urlopen
+
+          base = os.environ["GEMINI_HEROKU_URL"].rstrip("/")
+          deadline = time.time() + 20 * 60  # 20 minutes
+
+          while time.time() < deadline:
+              with urlopen(f"{base}/api/pipeline/status", timeout=30) as resp:
+                  status = json.loads(resp.read().decode("utf-8"))
+
+              state = str(status.get("status", "unknown"))
+              run_id = status.get("run_id")
+              print(f"pipeline_status={state} run_id={run_id}")
+
+              if state == "failed":
+                  raise SystemExit(f"Pipeline failed: {status.get('error')}")
+              if state in {"succeeded", "idle"}:
+                  break
+
+              time.sleep(30)
+          else:
+              raise SystemExit("Timed out waiting for pipeline status to settle")
+          PY
+
+      - name: Verify engine results freshness and shape
+        env:
+          GEMINI_HEROKU_URL: ${{ secrets.GEMINI_HEROKU_URL }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from datetime import date, timedelta
+          from urllib.request import urlopen
+
+          base = os.environ["GEMINI_HEROKU_URL"].rstrip("/")
+          with urlopen(f"{base}/api/engine/results", timeout=30) as resp:
+              payload = json.loads(resp.read().decode("utf-8"))
+
+          if payload.get("engine_name") != "gemini_stst":
+              raise SystemExit(f"Unexpected engine_name: {payload.get('engine_name')}")
+
+          if str(payload.get("status", "")).lower() not in {"success", "ok"}:
+              raise SystemExit(f"Non-success status: {payload.get('status')}")
+
+          run_date_raw = payload.get("run_date")
+          try:
+              run_date = date.fromisoformat(str(run_date_raw))
+          except Exception:
+              raise SystemExit(f"Invalid run_date: {run_date_raw}")
+
+          def business_days_between(start: date, end: date) -> int:
+              if start >= end:
+                  return 0
+              count = 0
+              d = start + timedelta(days=1)
+              while d <= end:
+                  if d.weekday() < 5:
+                      count += 1
+                  d += timedelta(days=1)
+              return count
+
+          lag_bd = business_days_between(run_date, date.today())
+          if lag_bd > 2:
+              raise SystemExit(
+                  f"Stale run_date: {run_date.isoformat()} ({lag_bd} business days old)"
+              )
+
+          screened = int(payload.get("candidates_screened", 0) or 0)
+          if screened <= 0:
+              raise SystemExit("Invalid candidates_screened: expected > 0")
+
+          picks = payload.get("picks") or []
+          missing_risk = []
+          for p in picks:
+              ticker = p.get("ticker", "?")
+              entry = float(p.get("entry_price") or 0)
+              stop = float(p.get("stop_loss") or 0)
+              target = float(p.get("target_price") or 0)
+              if entry <= 0 or stop <= 0 or target <= 0:
+                  missing_risk.append(ticker)
+
+          if missing_risk:
+              raise SystemExit(f"Picks missing valid risk fields: {missing_risk[:5]}")
+
+          print(
+              "Engine results verified: "
+              f"run_date={run_date.isoformat()} candidates={screened} picks={len(picks)}"
+          )
+          PY
