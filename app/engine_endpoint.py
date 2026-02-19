@@ -38,15 +38,19 @@ _pipeline_state: dict = {
 _MOMENTUM_STOP_MULT = 3.5
 
 
-def _compute_momentum_proxy_stop(entry_price: float | None, atr_pct: float | None) -> float | None:
-    """Compute a fixed stop proxy for momentum picks using the trailing-stop model.
+def _compute_momentum_risk_params(
+    entry_price: float | None,
+    atr_pct: float | None,
+    min_rr: float = 1.8,
+) -> tuple[float | None, float | None]:
+    """Compute fixed stop/target proxies for momentum picks.
 
-    Cross-engine consumers require explicit stop prices. Gemini STST manages
-    momentum risk with a Chandelier trailing stop, so we publish a conservative
-    initial fixed-stop proxy derived from ATR%.
+    The momentum model uses trailing exits internally; cross-engine consumers
+    require explicit entry/stop/target. We derive a stop from ATR and then
+    enforce a minimum reward:risk ratio for the published target.
     """
     if not entry_price or entry_price <= 0:
-        return None
+        return None, None
 
     if atr_pct and atr_pct > 0:
         trail_frac = _MOMENTUM_STOP_MULT * atr_pct / (math.sqrt(5) * 100.0)
@@ -54,7 +58,12 @@ def _compute_momentum_proxy_stop(entry_price: float | None, atr_pct: float | Non
     else:
         trail_frac = 0.10
 
-    return round(entry_price * (1 - trail_frac), 2)
+    target_frac = max(0.10, trail_frac * min_rr)
+    target_frac = min(0.35, target_frac)
+
+    stop = round(entry_price * (1 - trail_frac), 2)
+    target = round(entry_price * (1 + target_frac), 2)
+    return stop, target
 
 
 class EnginePick(BaseModel):
@@ -146,15 +155,16 @@ async def get_engine_results():
 
         for signal, ticker in momentum_query:
             confidence = signal.quality_score or 50.0  # quality_score is 0-100, use directly
+            stop_loss, target_price = _compute_momentum_risk_params(
+                signal.trigger_price,
+                signal.atr_pct_at_trigger,
+            )
             picks.append(EnginePick(
                 ticker=ticker.symbol,
                 strategy="momentum",
                 entry_price=signal.trigger_price or 0,
-                stop_loss=_compute_momentum_proxy_stop(
-                    signal.trigger_price,
-                    signal.atr_pct_at_trigger,
-                ),
-                target_price=round(signal.trigger_price * 1.10, 2) if signal.trigger_price else None,
+                stop_loss=stop_loss,
+                target_price=target_price,
                 confidence=confidence,
                 holding_period_days=10,  # Tuned momentum hold
                 thesis=f"RVOL={signal.rvol_at_trigger:.1f}x, ATR%={signal.atr_pct_at_trigger:.1f}%"
