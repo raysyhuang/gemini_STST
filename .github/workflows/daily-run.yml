@@ -71,14 +71,27 @@ jobs:
           import json
           import os
           import time
+          from urllib.error import HTTPError, URLError
           from urllib.request import urlopen
 
           base = os.environ["GEMINI_HEROKU_URL"].rstrip("/")
           deadline = time.time() + 20 * 60  # 20 minutes
+          MAX_TRANSIENT_RETRIES = 5
+          transient_failures = 0
 
           while time.time() < deadline:
-              with urlopen(f"{base}/api/pipeline/status", timeout=30) as resp:
-                  status = json.loads(resp.read().decode("utf-8"))
+              try:
+                  with urlopen(f"{base}/api/pipeline/status", timeout=30) as resp:
+                      status = json.loads(resp.read().decode("utf-8"))
+                  transient_failures = 0  # reset on success
+              except (HTTPError, URLError, OSError) as exc:
+                  code = getattr(exc, "code", None)
+                  transient_failures += 1
+                  print(f"Poll error ({transient_failures}/{MAX_TRANSIENT_RETRIES}): {exc}")
+                  if transient_failures >= MAX_TRANSIENT_RETRIES:
+                      raise SystemExit(f"Too many consecutive poll failures: {exc}")
+                  time.sleep(30)
+                  continue
 
               state = str(status.get("status", "unknown"))
               run_id = status.get("run_id")
