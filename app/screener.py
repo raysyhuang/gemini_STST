@@ -28,6 +28,7 @@ from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
 from app.models import Ticker, DailyMarketData, ScreenerSignal
+from app.prefilter import prefilter_active_tickers
 from app.indicators import add_all_indicators, check_market_regime
 
 logger = logging.getLogger(__name__)
@@ -158,11 +159,19 @@ def run_screener(
         active_wt = get_active_weights(db, "momentum")
         momentum_weights = active_wt.weights if active_wt else None
 
-        # --- Load all active tickers ---
-        all_tickers = db.query(Ticker).filter(Ticker.is_active.is_(True)).all()
+        # --- Pre-filter: only load tickers whose latest close/volume pass basic thresholds ---
+        prefiltered_ids = prefilter_active_tickers(
+            db, screen_date,
+            min_price=MIN_PRICE,
+            min_volume_proxy=MIN_ADV / 5,  # Loose proxy: single-day vol > ADV/5
+        )
+        if prefiltered_ids:
+            all_tickers = db.query(Ticker).filter(Ticker.id.in_(prefiltered_ids)).all()
+        else:
+            all_tickers = []
         ticker_map = {t.id: t for t in all_tickers}
         ticker_ids = list(ticker_map.keys())
-        logger.info("Screening %d active tickers for %s", len(all_tickers), screen_date)
+        logger.info("Screening %d pre-filtered tickers for %s", len(all_tickers), screen_date)
 
         # --- P1 FIX: Batch load ALL OHLCV in one query ---
         all_ohlcv = _load_all_ohlcv(db, ticker_ids, lookback_start)
