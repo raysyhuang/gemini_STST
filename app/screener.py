@@ -153,6 +153,11 @@ def run_screener(
 
     db = SessionLocal()
     try:
+        # --- Load learned weights (if approved), else use hardcoded defaults ---
+        from app.learning import get_active_weights
+        active_wt = get_active_weights(db, "momentum")
+        momentum_weights = active_wt.weights if active_wt else None
+
         # --- Load all active tickers ---
         all_tickers = db.query(Ticker).filter(Ticker.is_active.is_(True)).all()
         ticker_map = {t.id: t for t in all_tickers}
@@ -272,8 +277,10 @@ def run_screener(
                 funnel["return_5d"] += 1
                 continue
 
-            # Compute momentum quality score (0-100)
-            quality = _compute_momentum_quality(latest)
+            # Compute momentum quality score (0-100) + per-factor scores
+            quality, factor_scores = _compute_momentum_quality(
+                latest, weights=momentum_weights,
+            )
 
             signals.append({
                 "ticker_id": tkr.id,
@@ -286,6 +293,7 @@ def run_screener(
                 "rsi_14": round(float(latest["rsi_14"]), 1) if not pd.isna(latest.get("rsi_14")) else None,
                 "pct_from_52w_high": round(float(latest["pct_from_52w_high"]), 1) if not pd.isna(latest.get("pct_from_52w_high")) else None,
                 "quality_score": quality,
+                "factor_scores": factor_scores,
                 "confluence": False,  # set later by _detect_confluence
             })
 
@@ -318,21 +326,37 @@ def run_screener(
     }
 
 
+MOMENTUM_DEFAULT_WEIGHTS = {
+    "rvol": 0.25,
+    "high_prox": 0.20,
+    "rsi_sweet": 0.15,
+    "trend": 0.15,
+    "candle": 0.10,
+    "options": 0.15,
+}
+
+
 def _compute_momentum_quality(
     latest: pd.Series,
     options_sentiment: str | None = None,
-) -> float:
+    weights: dict | None = None,
+) -> tuple[float, dict]:
     """
     Compute a 0-100 composite quality score for a momentum signal.
 
-    Components (weighted):
-      - RVOL strength:          25%  (2.0 → 0, 5.0 → 100)
-      - 52-week high proximity: 20%  (within 0% → 100, 10% below → 0)
-      - RSI(14) sweet spot:     15%  (57.5 → 100, edges of 40/75 → 0)
-      - Trend alignment:        15%  (close/SMA-50 distance: 0% → 0, 10%+ → 100)
-      - Candle strength:        10%  (body%: 0% → 0, 3% → 100)
-      - Options flow:           15%  (Bullish → 100, Neutral → 50, Bearish → 0)
+    Returns (composite_score, factor_scores_dict) where factor_scores_dict
+    maps factor name → individual 0-100 score.
+
+    Components (default weights):
+      - rvol:      25%  (2.0 → 0, 5.0 → 100)
+      - high_prox: 20%  (within 0% → 100, 10% below → 0)
+      - rsi_sweet: 15%  (57.5 → 100, edges of 40/75 → 0)
+      - trend:     15%  (close/SMA-50 distance: 0% → 0, 10%+ → 100)
+      - candle:    10%  (body%: 0% → 0, 3% → 100)
+      - options:   15%  (Bullish → 100, Neutral → 50, Bearish → 0)
     """
+    w = weights if weights else MOMENTUM_DEFAULT_WEIGHTS
+
     def _clamp(val):
         return max(0.0, min(100.0, val))
 
@@ -364,33 +388,47 @@ def _compute_momentum_quality(
     options_map = {"Bullish": 100.0, "Neutral": 50.0, "Bearish": 0.0}
     options_score = options_map.get(options_sentiment, 50.0)
 
+    factor_scores = {
+        "rvol": round(rvol_score, 1),
+        "high_prox": round(high_prox_score, 1),
+        "rsi_sweet": round(rsi_score, 1),
+        "trend": round(trend_score, 1),
+        "candle": round(candle_score, 1),
+        "options": round(options_score, 1),
+    }
+
     quality = (
-        rvol_score * 0.25
-        + high_prox_score * 0.20
-        + rsi_score * 0.15
-        + trend_score * 0.15
-        + candle_score * 0.10
-        + options_score * 0.15
+        rvol_score * w.get("rvol", 0.25)
+        + high_prox_score * w.get("high_prox", 0.20)
+        + rsi_score * w.get("rsi_sweet", 0.15)
+        + trend_score * w.get("trend", 0.15)
+        + candle_score * w.get("candle", 0.10)
+        + options_score * w.get("options", 0.15)
     )
-    return round(quality, 1)
+    return round(quality, 1), factor_scores
 
 
 def _recompute_quality_with_options(
     base_quality: float,
     options_sentiment: str | None,
-) -> float:
+    factor_scores: dict | None = None,
+) -> tuple[float, dict | None]:
     """
     Adjust quality score by replacing the neutral options default (50)
     with the actual options sentiment.
 
     The options component is 15% of the total score. During initial screening,
     options_sentiment=None → 50/100 (neutral). Now we substitute the real value.
+
+    Returns (adjusted_quality, updated_factor_scores).
     """
     options_map = {"Bullish": 100.0, "Neutral": 50.0, "Bearish": 0.0}
     actual_score = options_map.get(options_sentiment, 50.0)
     # Remove neutral default contribution, add actual
     adjusted = base_quality - 50.0 * 0.15 + actual_score * 0.15
-    return round(max(0.0, min(100.0, adjusted)), 1)
+    if factor_scores is not None:
+        factor_scores = {**factor_scores, "options": round(actual_score, 1)}
+    return round(max(0.0, min(100.0, adjusted)), 1), factor_scores
 
 
 def _detect_confluence(
@@ -551,8 +589,9 @@ async def run_daily_pipeline(screen_date: date | None = None) -> dict:
     # Re-compute quality scores now that we have actual options sentiment
     # (initial screening used neutral default for the options component)
     for sig in signals:
-        sig["quality_score"] = _recompute_quality_with_options(
+        sig["quality_score"], sig["factor_scores"] = _recompute_quality_with_options(
             sig["quality_score"], sig.get("options_sentiment"),
+            sig.get("factor_scores"),
         )
 
     # Re-sort by updated quality score

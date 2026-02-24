@@ -25,6 +25,9 @@ from fastapi.staticfiles import StaticFiles
 from app.database import init_db, SessionLocal
 from app.models import Ticker, ScreenerSignal
 from app.schemas import (
+    ActiveWeightResponse,
+    ActiveWeightsListResponse,
+    AnalyzeResponse,
     BackfillResponse,
     BacktestResultResponse,
     EquityCurveResponse,
@@ -37,6 +40,8 @@ from app.schemas import (
     ReversionSignalResponse,
     ScreenerResponse,
     SignalResponse,
+    WeightRecommendationListResponse,
+    WeightRecommendationResponse,
 )
 from app.news_fetcher import fetch_news
 
@@ -347,6 +352,159 @@ async def portfolio_backtest(months: int = Query(default=6, ge=1, le=12)):
 
     result = await asyncio.to_thread(_run_bt, months)
     return result
+
+
+# ------------------------------------------------------------------
+# Recalibration
+# ------------------------------------------------------------------
+
+@app.get("/api/recalibration/recommendations", response_model=WeightRecommendationListResponse)
+async def recalibration_recommendations(status: str | None = None):
+    """List all weight recommendations, optionally filtered by status."""
+    from app.learning import get_all_recommendations
+
+    db = SessionLocal()
+    try:
+        recs = get_all_recommendations(db, status=status)
+        return WeightRecommendationListResponse(
+            recommendations=[
+                WeightRecommendationResponse(
+                    id=r.id,
+                    strategy=r.strategy,
+                    status=r.status,
+                    n_trades_analyzed=r.n_trades_analyzed,
+                    overall_win_rate=r.overall_win_rate,
+                    current_weights=r.current_weights,
+                    recommended_weights=r.recommended_weights,
+                    factor_analysis=r.factor_analysis,
+                    created_at=str(r.created_at) if r.created_at else None,
+                    approved_at=str(r.approved_at) if r.approved_at else None,
+                    notes=r.notes,
+                )
+                for r in recs
+            ]
+        )
+    finally:
+        db.close()
+
+
+@app.get("/api/recalibration/recommendations/{rec_id}", response_model=WeightRecommendationResponse)
+async def recalibration_recommendation_detail(rec_id: int):
+    """Get detail for a single weight recommendation."""
+    from app.models import WeightRecommendation
+
+    db = SessionLocal()
+    try:
+        rec = db.query(WeightRecommendation).filter(WeightRecommendation.id == rec_id).first()
+        if not rec:
+            raise HTTPException(status_code=404, detail=f"Recommendation #{rec_id} not found")
+        return WeightRecommendationResponse(
+            id=rec.id,
+            strategy=rec.strategy,
+            status=rec.status,
+            n_trades_analyzed=rec.n_trades_analyzed,
+            overall_win_rate=rec.overall_win_rate,
+            current_weights=rec.current_weights,
+            recommended_weights=rec.recommended_weights,
+            factor_analysis=rec.factor_analysis,
+            created_at=str(rec.created_at) if rec.created_at else None,
+            approved_at=str(rec.approved_at) if rec.approved_at else None,
+            notes=rec.notes,
+        )
+    finally:
+        db.close()
+
+
+@app.post("/api/recalibration/analyze", response_model=AnalyzeResponse)
+async def recalibration_analyze(strategy: str | None = None):
+    """Trigger factor weight analysis. Analyzes both strategies if none specified."""
+    from app.learning import create_recommendation
+
+    strategies = [strategy] if strategy else ["momentum", "reversion"]
+    results = []
+    errors = []
+
+    db = SessionLocal()
+    try:
+        for s in strategies:
+            try:
+                rec = create_recommendation(db, s)
+                if rec:
+                    results.append(WeightRecommendationResponse(
+                        id=rec.id,
+                        strategy=rec.strategy,
+                        status=rec.status,
+                        n_trades_analyzed=rec.n_trades_analyzed,
+                        overall_win_rate=rec.overall_win_rate,
+                        current_weights=rec.current_weights,
+                        recommended_weights=rec.recommended_weights,
+                        factor_analysis=rec.factor_analysis,
+                        created_at=str(rec.created_at) if rec.created_at else None,
+                    ))
+                else:
+                    errors.append(f"Insufficient data for {s}")
+            except Exception as e:
+                errors.append(f"{s}: {str(e)}")
+    finally:
+        db.close()
+
+    return AnalyzeResponse(recommendations=results, errors=errors)
+
+
+@app.post("/api/recalibration/approve/{rec_id}", response_model=ActiveWeightResponse)
+async def recalibration_approve(rec_id: int):
+    """Approve a pending recommendation and activate the learned weights."""
+    from app.learning import apply_recommendation
+
+    db = SessionLocal()
+    try:
+        active = apply_recommendation(db, rec_id)
+        return ActiveWeightResponse(
+            strategy=active.strategy,
+            weights=active.weights,
+            version=active.version,
+            activated_at=str(active.activated_at) if active.activated_at else None,
+            recommendation_id=active.recommendation_id,
+            quality_floor=active.quality_floor,
+            regime_multipliers=active.regime_multipliers,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        db.close()
+
+
+@app.get("/api/recalibration/active-weights", response_model=ActiveWeightsListResponse)
+async def recalibration_active_weights():
+    """Return current active weights for all strategies (learned or hardcoded defaults)."""
+    from app.learning import get_active_weights, DEFAULT_WEIGHTS
+
+    db = SessionLocal()
+    try:
+        items = []
+        for strategy in ["momentum", "reversion"]:
+            active = get_active_weights(db, strategy)
+            if active:
+                items.append(ActiveWeightResponse(
+                    strategy=active.strategy,
+                    weights=active.weights,
+                    version=active.version,
+                    activated_at=str(active.activated_at) if active.activated_at else None,
+                    recommendation_id=active.recommendation_id,
+                    quality_floor=active.quality_floor,
+                    regime_multipliers=active.regime_multipliers,
+                    source="learned",
+                ))
+            else:
+                items.append(ActiveWeightResponse(
+                    strategy=strategy,
+                    weights=DEFAULT_WEIGHTS[strategy],
+                    version=0,
+                    source="hardcoded",
+                ))
+        return ActiveWeightsListResponse(weights=items)
+    finally:
+        db.close()
 
 
 # ------------------------------------------------------------------

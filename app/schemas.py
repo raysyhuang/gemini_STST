@@ -138,3 +138,59 @@ class BackfillResponse(BaseModel):
 
 class EquityCurveResponse(BaseModel):
     equity_curve: list[dict[str, Any]]
+
+
+# -- Recalibration --
+
+class FactorQuartileDetail(BaseModel):
+    n: int
+    raw_wr: Optional[float] = None
+    smoothed_wr: float
+
+
+class FactorAnalysisResponse(BaseModel):
+    factor: str
+    quartiles: dict[str, FactorQuartileDetail]
+    predictive_power: float
+
+
+class WeightRecommendationResponse(BaseModel):
+    id: int
+    strategy: str
+    status: str
+    n_trades_analyzed: int
+    overall_win_rate: float
+    current_weights: dict[str, float]
+    recommended_weights: dict[str, float]
+    factor_analysis: Optional[list[dict[str, Any]]] = None
+    created_at: Optional[str] = None
+    approved_at: Optional[str] = None
+    notes: Optional[str] = None
+
+    model_config = {"from_attributes": True}
+
+
+class WeightRecommendationListResponse(BaseModel):
+    recommendations: list[WeightRecommendationResponse]
+
+
+class ActiveWeightResponse(BaseModel):
+    strategy: str
+    weights: dict[str, float]
+    version: int
+    activated_at: Optional[str] = None
+    recommendation_id: Optional[int] = None
+    quality_floor: Optional[float] = None
+    regime_multipliers: Optional[dict[str, float]] = None
+    source: str = "learned"  # "learned" or "hardcoded"
+
+    model_config = {"from_attributes": True}
+
+
+class ActiveWeightsListResponse(BaseModel):
+    weights: list[ActiveWeightResponse]
+
+
+class AnalyzeResponse(BaseModel):
+    recommendations: list[WeightRecommendationResponse]
+    errors: list[str] = []

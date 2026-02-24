@@ -102,16 +102,33 @@ def _save_reversion_signals(db: Session, signals: list[dict]) -> None:
     logger.info("Saved %d reversion signals to Postgres", len(values))
 
 
-def _compute_reversion_quality(latest: pd.Series, sma_distance_pct: float) -> float:
+REVERSION_DEFAULT_WEIGHTS = {
+    "rsi_depth": 0.35,
+    "drawdown": 0.25,
+    "sma200_margin": 0.20,
+    "stretch": 0.20,
+}
+
+
+def _compute_reversion_quality(
+    latest: pd.Series,
+    sma_distance_pct: float,
+    weights: dict | None = None,
+) -> tuple[float, dict]:
     """
     Compute a 0-100 composite quality score for a reversion signal.
 
-    Components (weighted):
-      - RSI depth:       35%  (RSI 10 → 0, RSI 0 → 100)
-      - Drawdown depth:  25%  (|dd3d| 15% → 0, 30% → 100)
-      - SMA-200 margin:  20%  (close/SMA200 - 1: 0% → 0, 10% → 100)
-      - Stretch:         20%  (|sma_dist| 0% → 0, 10% → 100)
+    Returns (composite_score, factor_scores_dict) where factor_scores_dict
+    maps factor name → individual 0-100 score.
+
+    Components (default weights):
+      - rsi_depth:      35%  (RSI 10 → 0, RSI 0 → 100)
+      - drawdown:       25%  (|dd3d| 15% → 0, 30% → 100)
+      - sma200_margin:  20%  (close/SMA200 - 1: 0% → 0, 10% → 100)
+      - stretch:        20%  (|sma_dist| 0% → 0, 10% → 100)
     """
+    w = weights if weights else REVERSION_DEFAULT_WEIGHTS
+
     def _clamp(val):
         return max(0.0, min(100.0, val))
 
@@ -125,13 +142,20 @@ def _compute_reversion_quality(latest: pd.Series, sma_distance_pct: float) -> fl
     sma200_score = _clamp(((close / sma_200) - 1.0) / 0.10 * 100)
     stretch_score = _clamp(abs(sma_distance_pct) / 10.0 * 100)
 
+    factor_scores = {
+        "rsi_depth": round(rsi_score, 1),
+        "drawdown": round(drawdown_score, 1),
+        "sma200_margin": round(sma200_score, 1),
+        "stretch": round(stretch_score, 1),
+    }
+
     quality = (
-        rsi_score * 0.35
-        + drawdown_score * 0.25
-        + sma200_score * 0.20
-        + stretch_score * 0.20
+        rsi_score * w.get("rsi_depth", 0.35)
+        + drawdown_score * w.get("drawdown", 0.25)
+        + sma200_score * w.get("sma200_margin", 0.20)
+        + stretch_score * w.get("stretch", 0.20)
     )
-    return round(quality, 1)
+    return round(quality, 1), factor_scores
 
 
 def run_reversion_screener(screen_date: date | None = None) -> dict:
@@ -163,6 +187,11 @@ def run_reversion_screener(screen_date: date | None = None) -> dict:
 
     db = SessionLocal()
     try:
+        # Load learned weights (if approved), else use hardcoded defaults
+        from app.learning import get_active_weights
+        active_wt = get_active_weights(db, "reversion")
+        reversion_weights = active_wt.weights if active_wt else None
+
         # Load all active tickers
         all_tickers = db.query(Ticker).filter(Ticker.is_active.is_(True)).all()
         ticker_map = {t.id: t for t in all_tickers}
@@ -260,8 +289,10 @@ def run_reversion_screener(screen_date: date | None = None) -> dict:
         # ATR% for vol-scaled sizing
         atr_pct_val = round(float(latest["atr_pct"]), 1) if not pd.isna(latest["atr_pct"]) else 10.0
 
-        # Compute reversion quality score (0-100)
-        quality = _compute_reversion_quality(latest, sma_distance_pct)
+        # Compute reversion quality score (0-100) + per-factor scores
+        quality, factor_scores = _compute_reversion_quality(
+            latest, sma_distance_pct, weights=reversion_weights,
+        )
 
         signals.append({
             "ticker_id": tkr.id,
@@ -274,6 +305,7 @@ def run_reversion_screener(screen_date: date | None = None) -> dict:
             "sma_distance_pct": sma_distance_pct,
             "atr_pct_at_trigger": atr_pct_val,
             "quality_score": quality,
+            "factor_scores": factor_scores,
             "confluence": False,  # set by screener._detect_confluence
         })
 

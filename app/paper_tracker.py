@@ -80,6 +80,17 @@ def create_pending_trades(
 
     Returns the number of new trades created.
     """
+    # Load learned quality floor and regime multipliers from ActiveWeight
+    from app.learning import get_active_weights
+    active_wt = get_active_weights(db, strategy)
+    quality_floor = MOMENTUM_QUALITY_FLOOR
+    learned_regime_mults = None
+    if active_wt:
+        if active_wt.quality_floor is not None:
+            quality_floor = active_wt.quality_floor
+        if active_wt.regime_multipliers:
+            learned_regime_mults = active_wt.regime_multipliers
+
     created = 0
     for sig in signals:
         ticker_id = sig.get("ticker_id")
@@ -90,7 +101,7 @@ def create_pending_trades(
         # Quality floor: skip low-quality momentum signals
         if strategy == "momentum":
             q = sig.get("quality_score", 0) or 0
-            if q < MOMENTUM_QUALITY_FLOOR:
+            if q < quality_floor:
                 continue
             # Regime gate: skip momentum trades in Bearish regime
             if SKIP_BEARISH_REGIME and regime == "Bearish":
@@ -116,8 +127,11 @@ def create_pending_trades(
         else:
             scaled_frac = 0.10  # fallback
 
-        # Regime multiplier
-        regime_mult = REGIME_MULTIPLIERS.get(regime, 0.75)
+        # Regime multiplier: prefer learned, fallback to hardcoded
+        if learned_regime_mults:
+            regime_mult = learned_regime_mults.get(regime, 0.75)
+        else:
+            regime_mult = REGIME_MULTIPLIERS.get(regime, 0.75)
 
         # Quality multiplier
         q = sig.get("quality_score", 0) or 0
@@ -137,6 +151,8 @@ def create_pending_trades(
             signal_date=signal_date,
             position_size=pos_size,
             quality_score=sig.get("quality_score"),
+            regime_tag=regime,
+            factor_scores=sig.get("factor_scores"),
             status="pending",
         )
         db.add(trade)
@@ -159,8 +175,12 @@ def fill_pending_trades(db: Session) -> int:
     after signal_date to get the entry price. Compute stop level
     and planned exit date.
 
+    Signal decay: cancel pending trades older than max_pending_days.
+
     Returns the number of trades filled.
     """
+    from app.recalibration_config import RECAL_CONFIG
+
     pending = (
         db.query(PaperTrade)
         .filter(PaperTrade.status == "pending")
@@ -168,6 +188,24 @@ def fill_pending_trades(db: Session) -> int:
     )
     if not pending:
         return 0
+
+    # Signal decay: cancel stale pending trades
+    decay_cfg = RECAL_CONFIG.get("signal_decay", {})
+    if decay_cfg.get("enabled"):
+        max_days = decay_cfg.get("max_pending_days", 3)
+        today = date.today()
+        decayed = 0
+        for trade in pending:
+            age = (today - trade.signal_date).days
+            if age > max_days:
+                trade.status = "cancelled"
+                trade.exit_reason = "signal_decay"
+                decayed += 1
+        if decayed:
+            db.commit()
+            logger.info("Signal decay: cancelled %d stale pending trades (>%d days)", decayed, max_days)
+        # Re-query to exclude cancelled
+        pending = [t for t in pending if t.status == "pending"]
 
     filled = 0
     for trade in pending:
@@ -664,6 +702,7 @@ def backfill_paper_trades(db: Session) -> dict:
             "date": row.date,
             "atr_pct_at_trigger": row.atr_pct_at_trigger,
             "quality_score": row.quality_score,
+            "factor_scores": None,  # historical signals lack per-factor data
         })
 
     for row in reversion_rows:
@@ -672,6 +711,7 @@ def backfill_paper_trades(db: Session) -> dict:
             "date": row.date,
             "atr_pct_at_trigger": 10.0,  # reversion_signals doesn't store atr_pct
             "quality_score": row.quality_score,
+            "factor_scores": None,  # historical signals lack per-factor data
         })
 
     # 4. Get all trading dates from DB (min signal date to max + 30 days buffer)

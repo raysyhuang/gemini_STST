@@ -1,6 +1,6 @@
 from sqlalchemy import (
-    Column, Integer, String, Float, Date, BigInteger,
-    Boolean, ForeignKey, UniqueConstraint, Index,
+    Column, Integer, String, Float, Date, BigInteger, DateTime,
+    Boolean, ForeignKey, UniqueConstraint, Index, JSON,
 )
 from sqlalchemy.orm import relationship
 from app.database import Base
@@ -130,7 +130,11 @@ class PaperTrade(Base):
 
     pnl_dollars = Column(Float)
     pnl_pct = Column(Float)
-    status = Column(String(10), nullable=False, default="pending")  # pending/open/closed
+    status = Column(String(10), nullable=False, default="pending")  # pending/open/closed/cancelled
+
+    # Recalibration fields: regime + per-factor scores at signal time
+    regime_tag = Column(String(10))
+    factor_scores = Column(JSON)
 
     ticker = relationship("Ticker", back_populates="paper_trades")
 
@@ -139,3 +143,32 @@ class PaperTrade(Base):
         Index("idx_paper_status", "status"),
         Index("idx_paper_signal_date", "signal_date"),
     )
+
+
+class WeightRecommendation(Base):
+    __tablename__ = "weight_recommendations"
+
+    id = Column(Integer, primary_key=True)
+    strategy = Column(String(20), nullable=False)       # "momentum" or "reversion"
+    status = Column(String(10), nullable=False, default="pending")  # pending/approved/rejected
+    n_trades_analyzed = Column(Integer, nullable=False)
+    overall_win_rate = Column(Float, nullable=False)
+    current_weights = Column(JSON, nullable=False)
+    recommended_weights = Column(JSON, nullable=False)
+    factor_analysis = Column(JSON)                       # per-factor quartile detail
+    created_at = Column(DateTime, server_default="now()")
+    approved_at = Column(DateTime)
+    notes = Column(String(500))
+
+
+class ActiveWeight(Base):
+    __tablename__ = "active_weights"
+
+    id = Column(Integer, primary_key=True)
+    strategy = Column(String(20), unique=True, nullable=False)
+    weights = Column(JSON, nullable=False)
+    version = Column(Integer, nullable=False, default=1)
+    activated_at = Column(DateTime, server_default="now()")
+    recommendation_id = Column(Integer, ForeignKey("weight_recommendations.id"))
+    quality_floor = Column(Float)
+    regime_multipliers = Column(JSON)

@@ -67,6 +67,9 @@ def _migrate_new_columns(engine):
         # Phase 7: Momentum indicator snapshots
         "ALTER TABLE screener_signals ADD COLUMN IF NOT EXISTS rsi_14 FLOAT",
         "ALTER TABLE screener_signals ADD COLUMN IF NOT EXISTS pct_from_52w_high FLOAT",
+        # Recalibration: factor scores and regime tag on paper trades
+        "ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS regime_tag VARCHAR(10)",
+        "ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS factor_scores JSONB",
     ]
     with engine.connect() as conn:
         for sql in migrations:
