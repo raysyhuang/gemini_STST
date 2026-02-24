@@ -111,7 +111,15 @@ class EngineResultPayload(BaseModel):
 
 
 def _run_pipeline_job(run_id: str) -> None:
-    """Execute the daily screeners outside the request lifecycle."""
+    """Execute the full daily pipeline outside the request lifecycle.
+
+    Steps:
+      1. Fetch latest OHLCV from Polygon (90-day window)
+      2. Run momentum + reversion screeners (saves signals with factor_scores)
+      3. Paper trading lifecycle (create pending, fill, check stops)
+    """
+    import asyncio
+
     with _pipeline_state_lock:
         _pipeline_state["status"] = "running"
         _pipeline_state["run_id"] = run_id
@@ -120,11 +128,8 @@ def _run_pipeline_job(run_id: str) -> None:
         _pipeline_state["error"] = None
 
     try:
-        from app.screener import run_screener
-        from app.mean_reversion import run_reversion_screener
-
-        run_screener()
-        run_reversion_screener()
+        # Run the full async pipeline in a new event loop
+        asyncio.run(_run_pipeline_async(run_id))
 
         with _pipeline_state_lock:
             _pipeline_state["status"] = "succeeded"
@@ -137,6 +142,24 @@ def _run_pipeline_job(run_id: str) -> None:
             _pipeline_state["finished_at"] = datetime.utcnow().isoformat()
             _pipeline_state["error"] = str(e)
         logger.error("Pipeline job %s failed: %s", run_id, e, exc_info=True)
+
+
+async def _run_pipeline_async(run_id: str) -> None:
+    """Async implementation of the full daily pipeline."""
+    from app.data_fetcher import run_full_data_pipeline
+    from app.screener import run_daily_pipeline
+
+    # Step 1: Fetch latest OHLCV from Polygon (90-day window for daily screener)
+    logger.info("[%s] Starting data fetch pipeline (90 days)", run_id)
+    await run_full_data_pipeline(years_back=0)
+
+    # Step 2+3: Run screeners + news + paper trading (run_daily_pipeline handles all)
+    logger.info("[%s] Starting daily screener pipeline", run_id)
+    result = await run_daily_pipeline()
+
+    regime = result["regime"].get("regime", "Unknown")
+    n_signals = len(result.get("signals", []))
+    logger.info("[%s] Pipeline complete — Regime: %s | Signals: %d", run_id, regime, n_signals)
 
 
 def _get_regime_label(db) -> str:
