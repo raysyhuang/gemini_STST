@@ -81,6 +81,9 @@ LOOKBACK_CALENDAR_DAYS = 400
 # Signal cooldown: suppress repeats for 5 trading days
 COOLDOWN_CALENDAR_DAYS = 7  # ~5 trading days
 
+# Chunk size for OHLCV loading — keeps peak memory within 512MB Heroku dyno
+OHLCV_CHUNK_SIZE = 200
+
 
 def _load_all_ohlcv(db: Session, ticker_ids: list[int], since: date) -> pd.DataFrame:
     """
@@ -177,24 +180,25 @@ def run_screener(
         ticker_ids = list(ticker_map.keys())
         logger.info("Screening %d pre-filtered tickers for %s", len(all_tickers), screen_date)
 
-        # --- P1 FIX: Batch load ALL OHLCV in one query ---
-        all_ohlcv = _load_all_ohlcv(db, ticker_ids, lookback_start)
-        logger.info("Loaded %d OHLCV rows in single batch query", len(all_ohlcv))
-
-        # --- Market Regime Check (SPY + QQQ) ---
+        # --- Market Regime Check: load only SPY + QQQ (small query) ---
         regime_info = {"regime": "Unknown", "spy_above_sma20": None, "qqq_above_sma20": None}
         spy_tkr = next((t for t in all_tickers if t.symbol == "SPY"), None)
         qqq_tkr = next((t for t in all_tickers if t.symbol == "QQQ"), None)
-        if spy_tkr and qqq_tkr and not all_ohlcv.empty:
-            spy_df = all_ohlcv[all_ohlcv["ticker_id"] == spy_tkr.id].copy()
-            qqq_df = all_ohlcv[all_ohlcv["ticker_id"] == qqq_tkr.id].copy()
-            if len(spy_df) >= 20 and len(qqq_df) >= 20:
-                regime_info = check_market_regime(spy_df, qqq_df)
+        regime_ids = [t.id for t in (spy_tkr, qqq_tkr) if t is not None]
+        if spy_tkr and qqq_tkr:
+            regime_ohlcv = _load_all_ohlcv(db, regime_ids, lookback_start)
+            if not regime_ohlcv.empty:
+                spy_df = regime_ohlcv[regime_ohlcv["ticker_id"] == spy_tkr.id].copy()
+                qqq_df = regime_ohlcv[regime_ohlcv["ticker_id"] == qqq_tkr.id].copy()
+                if len(spy_df) >= 20 and len(qqq_df) >= 20:
+                    regime_info = check_market_regime(spy_df, qqq_df)
+            del regime_ohlcv
+            gc.collect()
 
         if regime_info["regime"] == "Bearish":
             logger.warning("BEARISH REGIME detected — SPY & QQQ below 20-day SMA")
 
-        # --- P1 FIX: Load cooldown set (tickers that signaled recently) ---
+        # --- Load cooldown set (tickers that signaled recently) ---
         cooldown_tickers = _load_recent_signal_tickers(db, cooldown_start)
         logger.info("Cooldown: %d tickers signaled in last %d days",
                      len(cooldown_tickers), COOLDOWN_CALENDAR_DAYS)
@@ -218,101 +222,111 @@ def run_screener(
             "passed": 0,
         }
 
-        # --- Screen each ticker using in-memory grouped data ---
+        # --- Screen tickers in chunks to stay within 512MB Heroku dyno ---
         signals: list[dict] = []
+        regime_id_set = set(regime_ids)
+        screen_ids = [tid for tid in ticker_ids if tid not in regime_id_set]
+        total_rows = 0
 
-        for tid, group_df in all_ohlcv.groupby("ticker_id"):
-            tkr = ticker_map.get(tid)
-            if tkr is None:
-                continue
+        for chunk_start in range(0, len(screen_ids), OHLCV_CHUNK_SIZE):
+            chunk_ids = screen_ids[chunk_start:chunk_start + OHLCV_CHUNK_SIZE]
+            chunk_ohlcv = _load_all_ohlcv(db, chunk_ids, lookback_start)
+            total_rows += len(chunk_ohlcv)
 
-            # Need at least 20 rows for indicator computation
-            if len(group_df) < 20:
-                funnel["insufficient_data"] += 1
-                continue
+            for tid, group_df in chunk_ohlcv.groupby("ticker_id"):
+                tkr = ticker_map.get(tid)
+                if tkr is None:
+                    continue
 
-            # Signal cooldown: skip if this ticker fired recently
-            if tid in cooldown_tickers:
-                funnel["cooldown"] += 1
-                continue
+                # Need at least 20 rows for indicator computation
+                if len(group_df) < 20:
+                    funnel["insufficient_data"] += 1
+                    continue
 
-            # Earnings blacklist: skip if earnings within hold window
-            if tkr.symbol in earnings_blacklist:
-                funnel["earnings"] += 1
-                continue
+                # Signal cooldown: skip if this ticker fired recently
+                if tid in cooldown_tickers:
+                    funnel["cooldown"] += 1
+                    continue
 
-            df = group_df[["date", "open", "high", "low", "close", "volume"]].copy()
-            df = add_all_indicators(df)
-            latest = df.iloc[-1]
+                # Earnings blacklist: skip if earnings within hold window
+                if tkr.symbol in earnings_blacklist:
+                    funnel["earnings"] += 1
+                    continue
 
-            # Make sure the latest row is actually on or near the screen_date
-            # (within a few days to handle weekends / holidays)
-            if (screen_date - latest["date"]).days > 5:
-                funnel["stale_data"] += 1
-                continue
+                df = group_df[["date", "open", "high", "low", "close", "volume"]].copy()
+                df = add_all_indicators(df)
+                latest = df.iloc[-1]
 
-            # --- Apply filter chain ---
-            if latest["close"] <= MIN_PRICE:
-                funnel["price"] += 1
-                continue
-            if pd.isna(latest["adv_20"]) or latest["adv_20"] <= MIN_ADV:
-                funnel["adv"] += 1
-                continue
-            if pd.isna(latest["atr_pct"]) or latest["atr_pct"] <= MIN_ATR_PCT:
-                funnel["atr_pct"] += 1
-                continue
-            if pd.isna(latest["rvol"]) or latest["rvol"] <= MIN_RVOL:
-                funnel["rvol"] += 1
-                continue
+                # Make sure the latest row is actually on or near the screen_date
+                # (within a few days to handle weekends / holidays)
+                if (screen_date - latest["date"]).days > 5:
+                    funnel["stale_data"] += 1
+                    continue
 
-            # 5. Trend Alignment: Close must be above SMA-20 (no falling knives)
-            if pd.isna(latest["sma_20"]) or latest["close"] <= latest["sma_20"]:
-                funnel["sma_20"] += 1
-                continue
+                # --- Apply filter chain ---
+                if latest["close"] <= MIN_PRICE:
+                    funnel["price"] += 1
+                    continue
+                if pd.isna(latest["adv_20"]) or latest["adv_20"] <= MIN_ADV:
+                    funnel["adv"] += 1
+                    continue
+                if pd.isna(latest["atr_pct"]) or latest["atr_pct"] <= MIN_ATR_PCT:
+                    funnel["atr_pct"] += 1
+                    continue
+                if pd.isna(latest["rvol"]) or latest["rvol"] <= MIN_RVOL:
+                    funnel["rvol"] += 1
+                    continue
 
-            # 6. Green Candle: Close > Open (buyers maintained control today)
-            if latest["close"] <= latest["open"]:
-                funnel["green_candle"] += 1
-                continue
+                # 5. Trend Alignment: Close must be above SMA-20 (no falling knives)
+                if pd.isna(latest["sma_20"]) or latest["close"] <= latest["sma_20"]:
+                    funnel["sma_20"] += 1
+                    continue
 
-            # 7. RSI(14) between 40-75: momentum present but not overbought
-            if pd.isna(latest.get("rsi_14")) or latest["rsi_14"] < MIN_RSI_14 or latest["rsi_14"] > MAX_RSI_14:
-                funnel["rsi_14"] += 1
-                continue
+                # 6. Green Candle: Close > Open (buyers maintained control today)
+                if latest["close"] <= latest["open"]:
+                    funnel["green_candle"] += 1
+                    continue
 
-            # 8. Close > SMA-50: intermediate trend confirmation
-            if pd.isna(latest.get("sma_50")) or latest["close"] <= latest["sma_50"]:
-                funnel["sma_50"] += 1
-                continue
+                # 7. RSI(14) between 40-75: momentum present but not overbought
+                if pd.isna(latest.get("rsi_14")) or latest["rsi_14"] < MIN_RSI_14 or latest["rsi_14"] > MAX_RSI_14:
+                    funnel["rsi_14"] += 1
+                    continue
 
-            # 9. 5-day return < 15%: exclude stocks that already ran (mean-reversion candidates)
-            if not pd.isna(latest.get("return_5d")) and latest["return_5d"] >= MAX_RETURN_5D:
-                funnel["return_5d"] += 1
-                continue
+                # 8. Close > SMA-50: intermediate trend confirmation
+                if pd.isna(latest.get("sma_50")) or latest["close"] <= latest["sma_50"]:
+                    funnel["sma_50"] += 1
+                    continue
 
-            # Compute momentum quality score (0-100) + per-factor scores
-            quality, factor_scores = _compute_momentum_quality(
-                latest, weights=momentum_weights,
-            )
+                # 9. 5-day return < 15%: exclude stocks that already ran (mean-reversion candidates)
+                if not pd.isna(latest.get("return_5d")) and latest["return_5d"] >= MAX_RETURN_5D:
+                    funnel["return_5d"] += 1
+                    continue
 
-            signals.append({
-                "ticker_id": tkr.id,
-                "symbol": tkr.symbol,
-                "company_name": tkr.company_name,
-                "date": latest["date"],
-                "trigger_price": round(float(latest["close"]), 2),
-                "rvol_at_trigger": round(float(latest["rvol"]), 2),
-                "atr_pct_at_trigger": round(float(latest["atr_pct"]), 1),
-                "rsi_14": round(float(latest["rsi_14"]), 1) if not pd.isna(latest.get("rsi_14")) else None,
-                "pct_from_52w_high": round(float(latest["pct_from_52w_high"]), 1) if not pd.isna(latest.get("pct_from_52w_high")) else None,
-                "quality_score": quality,
-                "factor_scores": factor_scores,
-                "confluence": False,  # set later by _detect_confluence
-            })
+                # Compute momentum quality score (0-100) + per-factor scores
+                quality, factor_scores = _compute_momentum_quality(
+                    latest, weights=momentum_weights,
+                )
 
-        # Release OHLCV DataFrame before saving — frees ~230MB
-        del all_ohlcv
-        gc.collect()
+                signals.append({
+                    "ticker_id": tkr.id,
+                    "symbol": tkr.symbol,
+                    "company_name": tkr.company_name,
+                    "date": latest["date"],
+                    "trigger_price": round(float(latest["close"]), 2),
+                    "rvol_at_trigger": round(float(latest["rvol"]), 2),
+                    "atr_pct_at_trigger": round(float(latest["atr_pct"]), 1),
+                    "rsi_14": round(float(latest["rsi_14"]), 1) if not pd.isna(latest.get("rsi_14")) else None,
+                    "pct_from_52w_high": round(float(latest["pct_from_52w_high"]), 1) if not pd.isna(latest.get("pct_from_52w_high")) else None,
+                    "quality_score": quality,
+                    "factor_scores": factor_scores,
+                    "confluence": False,  # set later by _detect_confluence
+                })
+
+            del chunk_ohlcv
+            gc.collect()
+
+        logger.info("Loaded %d OHLCV rows across %d chunks",
+                     total_rows, (len(screen_ids) + OHLCV_CHUNK_SIZE - 1) // OHLCV_CHUNK_SIZE)
 
         # Sort by quality score descending (strongest first)
         signals.sort(key=lambda s: s["quality_score"], reverse=True)

@@ -37,6 +37,9 @@ MIN_DRAWDOWN_3D = 0.15   # 15% decline over 3 sessions
 # Need at least 200 trading days for SMA-200; load extra buffer
 LOOKBACK_CALENDAR_DAYS = 300
 
+# Chunk size for OHLCV loading — keeps peak memory within 512MB Heroku dyno
+OHLCV_CHUNK_SIZE = 200
+
 
 def _load_all_ohlcv(db: Session, ticker_ids: list[int], since: date) -> pd.DataFrame:
     """Batch-load OHLCV for ALL ticker_ids in a single SQL query."""
@@ -211,16 +214,9 @@ def run_reversion_screener(screen_date: date | None = None) -> dict:
         ticker_ids = list(ticker_map.keys())
         logger.info("Reversion screener: %d pre-filtered tickers for %s", len(all_tickers), screen_date)
 
-        # Batch load ALL OHLCV in one query
-        all_ohlcv = _load_all_ohlcv(db, ticker_ids, lookback_start)
-        logger.info("Loaded %d OHLCV rows for reversion screener", len(all_ohlcv))
-
     except Exception:
         db.close()
         raise
-
-    if all_ohlcv.empty:
-        return {"date": screen_date, "signals": []}
 
     # --- Filter funnel counters ---
     funnel = {
@@ -235,96 +231,104 @@ def run_reversion_screener(screen_date: date | None = None) -> dict:
         "passed": 0,
     }
 
-    # Screen each ticker using in-memory grouped data
+    # Screen tickers in chunks to stay within 512MB Heroku dyno
     signals: list[dict] = []
+    total_rows = 0
 
-    for tid, group_df in all_ohlcv.groupby("ticker_id"):
-        tkr = ticker_map.get(tid)
-        if tkr is None:
-            continue
+    for chunk_start in range(0, len(ticker_ids), OHLCV_CHUNK_SIZE):
+        chunk_ids = ticker_ids[chunk_start:chunk_start + OHLCV_CHUNK_SIZE]
+        chunk_ohlcv = _load_all_ohlcv(db, chunk_ids, lookback_start)
+        total_rows += len(chunk_ohlcv)
 
-        # Need at least 200 rows for SMA-200
-        if len(group_df) < 200:
-            funnel["insufficient_data"] += 1
-            continue
+        for tid, group_df in chunk_ohlcv.groupby("ticker_id"):
+            tkr = ticker_map.get(tid)
+            if tkr is None:
+                continue
 
-        df = group_df[["date", "open", "high", "low", "close", "volume"]].copy()
-        df = df.sort_values("date").reset_index(drop=True)
+            # Need at least 200 rows for SMA-200
+            if len(group_df) < 200:
+                funnel["insufficient_data"] += 1
+                continue
 
-        # Compute indicators
-        df["rsi2"] = compute_rsi(df, period=2)
-        df["sma_200"] = compute_sma(df, column="close", period=200)
-        df["adv_20"] = compute_adv(df, period=20)
-        df["atr_pct"] = compute_atr_pct(df)
+            df = group_df[["date", "open", "high", "low", "close", "volume"]].copy()
+            df = df.sort_values("date").reset_index(drop=True)
 
-        # 3-day drawdown: (close today / close 3 days ago) - 1
-        df["close_3d_ago"] = df["close"].shift(3)
-        df["drawdown_3d"] = (df["close"] / df["close_3d_ago"]) - 1.0
+            # Compute indicators
+            df["rsi2"] = compute_rsi(df, period=2)
+            df["sma_200"] = compute_sma(df, column="close", period=200)
+            df["adv_20"] = compute_adv(df, period=20)
+            df["atr_pct"] = compute_atr_pct(df)
 
-        latest = df.iloc[-1]
+            # 3-day drawdown: (close today / close 3 days ago) - 1
+            df["close_3d_ago"] = df["close"].shift(3)
+            df["drawdown_3d"] = (df["close"] / df["close_3d_ago"]) - 1.0
 
-        # Make sure the latest row is near the screen_date
-        if (screen_date - latest["date"]).days > 5:
-            funnel["stale_data"] += 1
-            continue
+            latest = df.iloc[-1]
 
-        # --- Apply filter chain ---
+            # Make sure the latest row is near the screen_date
+            if (screen_date - latest["date"]).days > 5:
+                funnel["stale_data"] += 1
+                continue
 
-        # 1. Price > $5
-        if latest["close"] <= MIN_PRICE:
-            funnel["price"] += 1
-            continue
+            # --- Apply filter chain ---
 
-        # 2. ADV > 1.5M
-        if pd.isna(latest["adv_20"]) or latest["adv_20"] <= MIN_ADV:
-            funnel["adv"] += 1
-            continue
+            # 1. Price > $5
+            if latest["close"] <= MIN_PRICE:
+                funnel["price"] += 1
+                continue
 
-        # 3. RSI(2) < 10
-        if pd.isna(latest["rsi2"]) or latest["rsi2"] >= MAX_RSI2:
-            funnel["rsi2"] += 1
-            continue
+            # 2. ADV > 1.5M
+            if pd.isna(latest["adv_20"]) or latest["adv_20"] <= MIN_ADV:
+                funnel["adv"] += 1
+                continue
 
-        # 4. 3-day drawdown >= 15%
-        if pd.isna(latest["drawdown_3d"]) or latest["drawdown_3d"] > -MIN_DRAWDOWN_3D:
-            funnel["drawdown_3d"] += 1
-            continue
+            # 3. RSI(2) < 10
+            if pd.isna(latest["rsi2"]) or latest["rsi2"] >= MAX_RSI2:
+                funnel["rsi2"] += 1
+                continue
 
-        # 5. Close > SMA-200 (long-term uptrend intact)
-        if pd.isna(latest["sma_200"]) or latest["close"] <= latest["sma_200"]:
-            funnel["sma_200"] += 1
-            continue
+            # 4. 3-day drawdown >= 15%
+            if pd.isna(latest["drawdown_3d"]) or latest["drawdown_3d"] > -MIN_DRAWDOWN_3D:
+                funnel["drawdown_3d"] += 1
+                continue
 
-        # SMA distance: how far below the 20-day SMA (rubber-band stretch)
-        sma_20 = df["close"].rolling(20).mean().iloc[-1]
-        sma_distance_pct = round(((latest["close"] / sma_20) - 1.0) * 100, 1) if not pd.isna(sma_20) else 0.0
+            # 5. Close > SMA-200 (long-term uptrend intact)
+            if pd.isna(latest["sma_200"]) or latest["close"] <= latest["sma_200"]:
+                funnel["sma_200"] += 1
+                continue
 
-        # ATR% for vol-scaled sizing
-        atr_pct_val = round(float(latest["atr_pct"]), 1) if not pd.isna(latest["atr_pct"]) else 10.0
+            # SMA distance: how far below the 20-day SMA (rubber-band stretch)
+            sma_20 = df["close"].rolling(20).mean().iloc[-1]
+            sma_distance_pct = round(((latest["close"] / sma_20) - 1.0) * 100, 1) if not pd.isna(sma_20) else 0.0
 
-        # Compute reversion quality score (0-100) + per-factor scores
-        quality, factor_scores = _compute_reversion_quality(
-            latest, sma_distance_pct, weights=reversion_weights,
-        )
+            # ATR% for vol-scaled sizing
+            atr_pct_val = round(float(latest["atr_pct"]), 1) if not pd.isna(latest["atr_pct"]) else 10.0
 
-        signals.append({
-            "ticker_id": tkr.id,
-            "symbol": tkr.symbol,
-            "company_name": tkr.company_name,
-            "date": latest["date"],
-            "trigger_price": round(float(latest["close"]), 2),
-            "rsi2": round(float(latest["rsi2"]), 1),
-            "drawdown_3d_pct": round(float(latest["drawdown_3d"]) * 100, 1),
-            "sma_distance_pct": sma_distance_pct,
-            "atr_pct_at_trigger": atr_pct_val,
-            "quality_score": quality,
-            "factor_scores": factor_scores,
-            "confluence": False,  # set by screener._detect_confluence
-        })
+            # Compute reversion quality score (0-100) + per-factor scores
+            quality, factor_scores = _compute_reversion_quality(
+                latest, sma_distance_pct, weights=reversion_weights,
+            )
 
-    # Release OHLCV DataFrame before saving — frees ~150MB
-    del all_ohlcv
-    gc.collect()
+            signals.append({
+                "ticker_id": tkr.id,
+                "symbol": tkr.symbol,
+                "company_name": tkr.company_name,
+                "date": latest["date"],
+                "trigger_price": round(float(latest["close"]), 2),
+                "rsi2": round(float(latest["rsi2"]), 1),
+                "drawdown_3d_pct": round(float(latest["drawdown_3d"]) * 100, 1),
+                "sma_distance_pct": sma_distance_pct,
+                "atr_pct_at_trigger": atr_pct_val,
+                "quality_score": quality,
+                "factor_scores": factor_scores,
+                "confluence": False,  # set by screener._detect_confluence
+            })
+
+        del chunk_ohlcv
+        gc.collect()
+
+    logger.info("Loaded %d OHLCV rows across %d chunks for reversion screener",
+                 total_rows, (len(ticker_ids) + OHLCV_CHUNK_SIZE - 1) // OHLCV_CHUNK_SIZE)
 
     funnel["passed"] = len(signals)
     logger.info(
