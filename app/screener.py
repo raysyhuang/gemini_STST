@@ -103,10 +103,14 @@ def _load_all_ohlcv(db: Session, ticker_ids: list[int], since: date) -> pd.DataF
     if not rows:
         return pd.DataFrame()
 
-    return pd.DataFrame(
+    df = pd.DataFrame(
         rows,
         columns=["ticker_id", "date", "open", "high", "low", "close", "volume"],
     )
+    # Downcast float64 → float32 to halve DataFrame memory footprint
+    float_cols = ["open", "high", "low", "close", "volume"]
+    df[float_cols] = df[float_cols].astype("float32")
+    return df
 
 
 def _load_recent_signal_tickers(db: Session, since: date) -> set[int]:
@@ -163,7 +167,7 @@ def run_screener(
         prefiltered_ids = prefilter_active_tickers(
             db, screen_date,
             min_price=MIN_PRICE,
-            min_volume_proxy=MIN_ADV / 5,  # Loose proxy: single-day vol > ADV/5
+            min_volume_proxy=MIN_ADV / 2,  # Avg recent volume > ADV/2
         )
         if prefiltered_ids:
             all_tickers = db.query(Ticker).filter(Ticker.id.in_(prefiltered_ids)).all()
@@ -305,6 +309,10 @@ def run_screener(
                 "factor_scores": factor_scores,
                 "confluence": False,  # set later by _detect_confluence
             })
+
+        # Release OHLCV DataFrame before saving — frees ~230MB
+        del all_ohlcv
+        gc.collect()
 
         # Sort by quality score descending (strongest first)
         signals.sort(key=lambda s: s["quality_score"], reverse=True)

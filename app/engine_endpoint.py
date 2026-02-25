@@ -146,12 +146,16 @@ def _run_pipeline_job(run_id: str) -> None:
 
 async def _run_pipeline_async(run_id: str) -> None:
     """Async implementation of the full daily pipeline."""
+    import gc
     from app.data_fetcher import run_full_data_pipeline
     from app.screener import run_daily_pipeline
 
     # Step 1: Fetch latest OHLCV from Polygon (90-day window for daily screener)
     logger.info("[%s] Starting data fetch pipeline (90 days)", run_id)
     await run_full_data_pipeline(years_back=0)
+
+    # Reclaim data-fetch buffers before screeners allocate their DataFrames
+    gc.collect()
 
     # Step 2+3: Run screeners + news + paper trading (run_daily_pipeline handles all)
     logger.info("[%s] Starting daily screener pipeline", run_id)

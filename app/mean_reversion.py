@@ -55,10 +55,14 @@ def _load_all_ohlcv(db: Session, ticker_ids: list[int], since: date) -> pd.DataF
     if not rows:
         return pd.DataFrame()
 
-    return pd.DataFrame(
+    df = pd.DataFrame(
         rows,
         columns=["ticker_id", "date", "open", "high", "low", "close", "volume"],
     )
+    # Downcast float64 → float32 to halve DataFrame memory footprint
+    float_cols = ["open", "high", "low", "close", "volume"]
+    df[float_cols] = df[float_cols].astype("float32")
+    return df
 
 
 def _save_reversion_signals(db: Session, signals: list[dict]) -> None:
@@ -197,7 +201,7 @@ def run_reversion_screener(screen_date: date | None = None) -> dict:
         prefiltered_ids = prefilter_active_tickers(
             db, screen_date,
             min_price=MIN_PRICE,
-            min_volume_proxy=MIN_ADV / 5,  # Loose proxy: single-day vol > ADV/5
+            min_volume_proxy=MIN_ADV / 2,  # Avg recent volume > ADV/2
         )
         if prefiltered_ids:
             all_tickers = db.query(Ticker).filter(Ticker.id.in_(prefiltered_ids)).all()
@@ -317,6 +321,10 @@ def run_reversion_screener(screen_date: date | None = None) -> dict:
             "factor_scores": factor_scores,
             "confluence": False,  # set by screener._detect_confluence
         })
+
+    # Release OHLCV DataFrame before saving — frees ~150MB
+    del all_ohlcv
+    gc.collect()
 
     funnel["passed"] = len(signals)
     logger.info(
