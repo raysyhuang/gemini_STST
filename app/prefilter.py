@@ -22,25 +22,33 @@ def prefilter_active_tickers(
 ) -> list[int]:
     """Pre-filter active tickers by recent price/volume to avoid loading unnecessary OHLCV.
 
-    Uses DISTINCT ON to grab each ticker's most recent close/volume within the
-    last 10 calendar days, then filters by min_price and a loose volume proxy.
+    Uses the latest close for price filtering and average volume over the last
+    10 calendar days as a proxy for ADV filtering.  Single-day volume is too
+    spiky to approximate 20-day ADV, so averaging gives a much tighter filter.
 
     Returns a list of ticker IDs that pass the pre-filter.
     """
     stmt = text("""
-        WITH latest AS (
+        WITH latest_close AS (
             SELECT DISTINCT ON (ticker_id)
-                ticker_id, close, volume
+                ticker_id, close
             FROM daily_market_data
             WHERE date >= :recent_cutoff
             ORDER BY ticker_id, date DESC
+        ),
+        avg_vol AS (
+            SELECT ticker_id, AVG(volume) AS avg_volume
+            FROM daily_market_data
+            WHERE date >= :recent_cutoff
+            GROUP BY ticker_id
         )
         SELECT t.id
         FROM tickers t
-        JOIN latest l ON l.ticker_id = t.id
+        JOIN latest_close lc ON lc.ticker_id = t.id
+        JOIN avg_vol av ON av.ticker_id = t.id
         WHERE t.is_active = TRUE
-          AND l.close > :min_price
-          AND l.volume > :min_volume_proxy
+          AND lc.close > :min_price
+          AND av.avg_volume > :min_volume_proxy
     """)
     recent_cutoff = screen_date - timedelta(days=10)
     rows = db.execute(stmt, {
@@ -50,7 +58,7 @@ def prefilter_active_tickers(
     }).scalars().all()
 
     logger.info(
-        "Pre-filter: %d tickers pass price>%.0f / vol>%.0f check for %s",
+        "Pre-filter: %d tickers pass price>%.0f / avg_vol>%.0f check for %s",
         len(rows), min_price, min_volume_proxy, screen_date,
     )
     return list(rows)
