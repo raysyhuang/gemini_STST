@@ -195,6 +195,13 @@ def run_screener(
             del regime_ohlcv
             gc.collect()
 
+        # Enrich regime with FRED macro data (VIX + yield curve)
+        macro_regime = _fetch_fred_regime()
+        if macro_regime:
+            regime_info["macro"] = macro_regime
+            if macro_regime.get("vix") is not None:
+                regime_info["vix"] = macro_regime["vix"]
+
         if regime_info["regime"] == "Bearish":
             logger.warning("BEARISH REGIME detected — SPY & QQQ below 20-day SMA")
 
@@ -552,6 +559,27 @@ def _save_signals(db: Session, signals: list[dict]) -> None:
     db.execute(stmt)
     db.commit()
     logger.info("Saved %d signals to Postgres", len(values))
+
+
+def _fetch_fred_regime() -> dict | None:
+    """Sync wrapper to fetch FRED macro regime. Returns None on failure."""
+    try:
+        import asyncio
+        from app.fred_client import get_macro_regime
+
+        # If we're already in an async context this won't work,
+        # but run_screener is called synchronously.
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            # Already in async context — skip to avoid nested event loop
+            return None
+        return asyncio.run(get_macro_regime())
+    except Exception:
+        return None
 
 
 # ------------------------------------------------------------------

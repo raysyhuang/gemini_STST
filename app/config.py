@@ -9,6 +9,12 @@ POLYGON_API_KEY: str = os.getenv("POLYGON_API_KEY", "").strip()
 # Finnhub (News / Catalysts)
 FINNHUB_API_KEY: str = os.getenv("FINNHUB_API_KEY", "").strip()
 
+# FMP (Financial Modeling Prep) — earnings calendar, redundant to Finnhub
+FMP_API_KEY: str = os.getenv("FMP_API_KEY", "").strip()
+
+# FRED (Federal Reserve Economic Data) — VIX, yield curve for regime context
+FRED_API_KEY: str = os.getenv("FRED_API_KEY", "").strip()
+
 # Heroku Postgres - CRITICAL: no SQLite allowed
 DATABASE_URL: str = os.getenv("DATABASE_URL", "").strip()
 

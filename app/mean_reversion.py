@@ -342,6 +342,16 @@ def run_reversion_screener(screen_date: date | None = None) -> dict:
     # Sort by quality score descending (strongest first)
     signals.sort(key=lambda s: s["quality_score"], reverse=True)
 
+    # FRED regime gate: when VIX > 35, mean-reversion bounces are less reliable
+    vix_warning = False
+    macro = _fetch_fred_vix()
+    if macro and macro > 35:
+        vix_warning = True
+        logger.warning(
+            "FRED VIX=%.1f > 35 — mean-reversion signals less reliable in extreme volatility",
+            macro,
+        )
+
     # Persist signals to Postgres
     try:
         _save_reversion_signals(db, signals)
@@ -354,4 +364,24 @@ def run_reversion_screener(screen_date: date | None = None) -> dict:
         "date": screen_date,
         "signals": signals,
         "funnel": funnel,
+        "vix_warning": vix_warning,
+        "vix": macro,
     }
+
+
+def _fetch_fred_vix() -> float | None:
+    """Sync fetch of VIX from FRED. Returns None on failure."""
+    try:
+        import asyncio
+        from app.fred_client import fetch_vix
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            return None
+        return asyncio.run(fetch_vix())
+    except Exception:
+        return None

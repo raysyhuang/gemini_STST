@@ -106,15 +106,39 @@ async def fetch_earnings_blacklist(
         return set()
 
     # data = {"earningsCalendar": [{"symbol": "AAPL", "date": "2026-02-15", ...}, ...]}
-    earnings_symbols = set()
+    finnhub_symbols = set()
     symbol_set = set(symbols)  # for O(1) lookup
     for entry in data.get("earningsCalendar", []):
         sym = entry.get("symbol", "")
         if sym in symbol_set:
-            earnings_symbols.add(sym)
+            finnhub_symbols.add(sym)
+
+    # Supplement with FMP earnings calendar (union both sources)
+    fmp_symbols = await _fmp_earnings_supplement(symbols, from_date, hold_days)
+    earnings_symbols = finnhub_symbols | fmp_symbols
+
+    if fmp_symbols - finnhub_symbols:
+        logger.info(
+            "FMP caught %d extra earnings symbols not in Finnhub: %s",
+            len(fmp_symbols - finnhub_symbols),
+            ", ".join(sorted(fmp_symbols - finnhub_symbols)[:10]),
+        )
 
     logger.info(
-        "Earnings blacklist: %d of %d screened symbols report within %d days",
+        "Earnings blacklist: %d of %d screened symbols report within %d days (Finnhub=%d, FMP=%d)",
         len(earnings_symbols), len(symbols), hold_days,
+        len(finnhub_symbols), len(fmp_symbols),
     )
     return earnings_symbols
+
+
+async def _fmp_earnings_supplement(
+    symbols: list[str], from_date: date, hold_days: int,
+) -> set[str]:
+    """Best-effort FMP earnings blacklist supplement. Returns empty set on failure."""
+    try:
+        from app.fmp_client import fetch_earnings_blacklist as fmp_blacklist
+        return await fmp_blacklist(symbols, from_date=from_date, hold_days=hold_days)
+    except Exception as e:
+        logger.debug("FMP earnings supplement skipped: %s", e)
+        return set()
