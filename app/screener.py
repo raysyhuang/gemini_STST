@@ -4,8 +4,8 @@ Daily momentum screener.
 Applies the QuantScreener filter chain to the latest market data:
   1. Price  > $5.00
   2. ADV    > 1,500,000  (20-day average daily volume)
-  3. ATR%   > 8%         (projected weekly volatility)
-  4. RVOL   > 2.0        (relative volume vs 20-day average)
+  3. ATR%   > 5%         (projected weekly volatility)
+  4. RVOL   > 1.5        (relative volume vs 20-day average)
   5. Trend Alignment: Close > SMA_20  (don't buy falling knives)
   6. Green Candle: Close > Open       (buyers maintained control)
   7. RSI(14) 40-75: momentum present but not overbought
@@ -36,8 +36,8 @@ logger = logging.getLogger(__name__)
 # PRD filter thresholds
 MIN_PRICE = 5.0
 MIN_ADV = 1_500_000
-MIN_ATR_PCT = 8.0
-MIN_RVOL = 2.0
+MIN_ATR_PCT = 5.0   # Lowered from 8.0 — 5% weekly projection still volatile
+MIN_RVOL = 1.5      # Lowered from 2.0 — 1.5x is above-average interest
 MIN_RSI_14 = 40.0
 MAX_RSI_14 = 75.0
 MAX_RETURN_5D = 15.0  # percent — exclude stocks already up >15% in 5 days

@@ -4,8 +4,8 @@ Mean Reversion (Oversold Bounce) screener.
 Applies the following filter chain to the latest market data:
   1. Price  > $5.00
   2. ADV    > 1,500,000  (20-day average daily volume)
-  3. RSI(2) < 10         (deeply oversold on 2-period RSI)
-  4. 3-Day Drawdown >= 15%  (stock fell at least 15% over 3 sessions)
+  3. RSI(2) < 15         (deeply oversold on 2-period RSI)
+  4. 3-Day Drawdown >= 8%   (stock fell at least 8% over 3 sessions)
   5. Close  > SMA-200       (long-term uptrend intact — not a broken stock)
 
 The strategy targets rubber-band snaps: quality names that fell hard
@@ -31,8 +31,8 @@ logger = logging.getLogger(__name__)
 # Filter thresholds
 MIN_PRICE = 5.0
 MIN_ADV = 1_500_000
-MAX_RSI2 = 10.0
-MIN_DRAWDOWN_3D = 0.15   # 15% decline over 3 sessions
+MAX_RSI2 = 15.0          # Widened from 10 — RSI(2)<15 still deeply oversold
+MIN_DRAWDOWN_3D = 0.08   # Lowered from 0.15 — 8% in 3 days is a meaningful pullback
 
 # Need at least 200 trading days for SMA-200; load extra buffer
 LOOKBACK_CALENDAR_DAYS = 300
