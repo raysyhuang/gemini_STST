@@ -299,7 +299,7 @@ def run_reversion_screener(screen_date: date | None = None) -> dict:
 
             # SMA distance: how far below the 20-day SMA (rubber-band stretch)
             sma_20 = df["close"].rolling(20).mean().iloc[-1]
-            sma_distance_pct = round(((latest["close"] / sma_20) - 1.0) * 100, 1) if not pd.isna(sma_20) else 0.0
+            sma_distance_pct = round(float((latest["close"] / sma_20) - 1.0) * 100, 1) if not pd.isna(sma_20) else 0.0
 
             # ATR% for vol-scaled sizing
             atr_pct_val = round(float(latest["atr_pct"]), 1) if not pd.isna(latest["atr_pct"]) else 10.0
