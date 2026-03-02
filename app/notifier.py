@@ -7,10 +7,12 @@ per-ticker details with Finnhub headlines.
 """
 
 import logging
+import os
 import ssl
 
 import aiohttp
 import certifi
+import requests as _requests
 
 from app.config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 from app.paper_tracker import MOMENTUM_QUALITY_FLOOR, SKIP_BEARISH_REGIME
@@ -19,6 +21,23 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
 _ssl_ctx = ssl.create_default_context(cafile=certifi.where())
+
+
+def _forward_to_mas_log(source: str, message: str, chat_id: str | None = None) -> None:
+    """Best-effort forward to MAS central telegram log."""
+    mas_url = os.environ.get("MAS_TELEGRAM_LOG_URL")
+    mas_key = os.environ.get("MAS_API_SECRET_KEY")
+    if not mas_url or not mas_key:
+        return
+    try:
+        _requests.post(
+            mas_url,
+            json={"source": source, "message": message, "chat_id": chat_id},
+            headers={"Authorization": f"Bearer {mas_key}"},
+            timeout=5,
+        )
+    except Exception:
+        pass
 
 
 def _escape_md(text: str) -> str:
@@ -201,6 +220,7 @@ async def send_telegram_alert(
             async with session.post(TELEGRAM_API, json=payload) as resp:
                 if resp.status == 200:
                     logger.info("Telegram alert sent successfully")
+                    _forward_to_mas_log("gemini_stst", message, TELEGRAM_CHAT_ID)
                     return True
                 else:
                     body = await resp.text()
