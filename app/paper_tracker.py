@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 # ── Constants (match backtester) ──────────────────────────────────
 MOMENTUM_HOLD_DAYS = 10              # tuned from 7 → 10 (sweep rank #1)
 REVERSION_HOLD_DAYS = 3              # tuned from 5 → 3 (reversion sweep rank #1)
-REVERSION_STOP = 0.05       # 5% hard stop-loss
+REVERSION_STOP = 0.07       # 7% hard stop-loss (widened from 5% — MFE data shows +5.5% avg favorable move but -5.6% MAE was triggering stops prematurely)
 SLIPPAGE = 0.002             # 20 bps
 FEES = 0.001                 # 0.1% each leg
 POSITION_SIZE = 1000.0       # $1,000 per trade (legacy flat sizing)
@@ -46,13 +46,14 @@ MOMENTUM_STOP_MULT = 3.5            # tuned from 2.0 → 3.5 (sweep rank #1)
 
 # Exit strategy: profit targets + hold extension
 MOMENTUM_PROFIT_TARGET = 0.10    # +10% → take profit
-REVERSION_PROFIT_TARGET = 0.10   # tuned from 5% → 10% (reversion sweep rank #1)
+REVERSION_PROFIT_TARGET = 0.06   # lowered from 10% → 6% (MFE shows avg +5.5% favorable move in 3-day window — 10% target was unreachable)
 EXTENDED_MOMENTUM_HOLD = 14      # high-quality: 14 days (was 10, scaled with new hold)
 EXTENDED_REVERSION_HOLD = 5      # high-quality: 5 days (scaled with new hold of 3)
 QUALITY_EXTENSION_THRESHOLD = 70  # Q >= 70 to qualify for extension
 
 # Signal quality gate
 MOMENTUM_QUALITY_FLOOR = 60      # skip signals with Q < 60 (sweep rank #1)
+REVERSION_QUALITY_FLOOR = 45     # skip reversion signals with Q < 45 (no floor before — weak signals were trading freely)
 
 # Regime-aware sizing + filtering
 REGIME_MULTIPLIERS = {"Bullish": 1.0, "Mixed": 0.75, "Bearish": 0.50}
@@ -83,7 +84,7 @@ def create_pending_trades(
     # Load learned quality floor and regime multipliers from ActiveWeight
     from app.learning import get_active_weights
     active_wt = get_active_weights(db, strategy)
-    quality_floor = MOMENTUM_QUALITY_FLOOR
+    quality_floor = MOMENTUM_QUALITY_FLOOR if strategy == "momentum" else REVERSION_QUALITY_FLOOR
     learned_regime_mults = None
     if active_wt:
         if active_wt.quality_floor is not None:
@@ -98,14 +99,13 @@ def create_pending_trades(
         if not ticker_id or not signal_date:
             continue
 
-        # Quality floor: skip low-quality momentum signals
-        if strategy == "momentum":
-            q = sig.get("quality_score", 0) or 0
-            if q < quality_floor:
-                continue
-            # Regime gate: skip momentum trades in Bearish regime
-            if SKIP_BEARISH_REGIME and regime == "Bearish":
-                continue
+        # Quality floor: skip low-quality signals
+        q = sig.get("quality_score", 0) or 0
+        if q < quality_floor:
+            continue
+        # Regime gate: skip momentum trades in Bearish regime
+        if strategy == "momentum" and SKIP_BEARISH_REGIME and regime == "Bearish":
+            continue
 
         # Check for existing trade (dedup)
         existing = (

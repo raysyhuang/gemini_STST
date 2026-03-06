@@ -22,6 +22,10 @@ from sqlalchemy import func
 
 from app.database import SessionLocal
 from app.models import Ticker, ScreenerSignal, ReversionSignal
+from app.paper_tracker import (
+    REVERSION_STOP, REVERSION_PROFIT_TARGET, REVERSION_HOLD_DAYS,
+    MOMENTUM_HOLD_DAYS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -211,7 +215,7 @@ async def get_engine_results():
                 stop_loss=stop_loss,
                 target_price=target_price,
                 confidence=confidence,
-                holding_period_days=10,  # Tuned momentum hold
+                holding_period_days=MOMENTUM_HOLD_DAYS,
                 thesis=f"RVOL={signal.rvol_at_trigger:.1f}x, ATR%={signal.atr_pct_at_trigger:.1f}%"
                 if signal.rvol_at_trigger and signal.atr_pct_at_trigger
                 else None,
@@ -247,10 +251,10 @@ async def get_engine_results():
                 ticker=ticker.symbol,
                 strategy="mean_reversion",
                 entry_price=signal.trigger_price or 0,
-                stop_loss=round(signal.trigger_price * 0.95, 2) if signal.trigger_price else None,
-                target_price=round(signal.trigger_price * 1.10, 2) if signal.trigger_price else None,
+                stop_loss=round(signal.trigger_price * (1 - REVERSION_STOP), 2) if signal.trigger_price else None,
+                target_price=round(signal.trigger_price * (1 + REVERSION_PROFIT_TARGET), 2) if signal.trigger_price else None,
                 confidence=confidence,
-                holding_period_days=3,  # Tuned reversion hold
+                holding_period_days=REVERSION_HOLD_DAYS,
                 thesis=f"RSI2={signal.rsi2_at_trigger:.1f}, DD3d={signal.drawdown_3d_pct:.1f}%"
                 if signal.rsi2_at_trigger and signal.drawdown_3d_pct
                 else None,

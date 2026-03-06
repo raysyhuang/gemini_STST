@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 # PRD filter thresholds
 MIN_PRICE = 5.0
 MIN_ADV = 1_500_000
-MIN_ATR_PCT = 5.0   # Lowered from 8.0 — 5% weekly projection still volatile
+MIN_ATR_PCT = 6.5   # Raised from 5.0 — too many low-vol false signals at 5%; 6.5% balances signal quality vs universe size
 MIN_RVOL = 1.5      # Lowered from 2.0 — 1.5x is above-average interest
 MIN_RSI_14 = 40.0
 MAX_RSI_14 = 75.0
